@@ -15,6 +15,7 @@ def parse_arguments(args=None):
     parser.add_argument("--seq-idx", '-s', type=int, help="Index of sequence with target region", required=True)
     parser.add_argument("--range", '-r', type=str, help="region coordinates. Format -> chr:start-end", required=True)
     parser.add_argument("--plot", action="store_true", help="If set, generate a visualization of the extracted region using MUMs from MUM file.")
+    parser.add_argument("--plot-full", action="store_true", help="If set, generate a visualization of the extracted region using all MUMs from MUM file.")
     parser.add_argument("--fasta", action="store_true", help="If set, generate a FASTA file for each sequence that contains the target sequence. Otherwise, only write a BED file of coordinates.")
     parser.add_argument("--output", '-o', type=str, default="output_dir", help="Output directory for shredded MUMs.")
     parser.add_argument("--sequences", '-x', type=int, nargs='*', default=None, help="One or more sequence indices to output BED or FASTA for. By default, all sequences are included.")
@@ -113,6 +114,26 @@ def plot_extract(args, coords, mums, mum_bounds, other_coords, seq_idx, sequence
     # print('saving plot to', os.path.join(args.output, 'extract_synteny.pdf'), file=sys.stderr)
     fig.savefig(os.path.join(args.output, 'extract_synteny.pdf'))
 
+def plot_full_synteny(args, coords, mums, mum_bounds, other_coords, seq_idx, sequences, seq_lengths):
+    offsets = np.array(other_coords)
+    plot_mums = MUMdata.from_arrays(
+        mums.lengths.copy(), 
+        mums.starts[:, sequences].copy(), 
+        mums.strands[:, sequences].copy(),
+        blocks = mums.blocks.copy()
+    )
+    # plot_mums.starts -= offsets[:,0]
+    start, end = np.array(coords)# - offsets[seq_idx,0]
+    centering= [0] * len(sequences)
+    poly, colors = mumemto.viz_mums.get_block_polygons(plot_mums.blocks, plot_mums, centering, inv_color='green')
+    fig, ax = plot(np.array(seq_lengths)[sequences], poly, colors, centering, size=(10,5))
+    ax.plot([start, start], [seq_idx - 0.5, seq_idx + 0.5], color='red', linestyle='--', linewidth=1)
+    ax.plot([end, end], [seq_idx - 0.5, seq_idx + 0.5], color='red', linestyle='--', linewidth=1)
+    for i, (start_coord, end_coord) in enumerate(other_coords):
+        ax.plot([start_coord, start_coord], [i - 0.5, i + 0.5], color='black', linestyle=':', linewidth=1)
+        ax.plot([end_coord, end_coord], [i - 0.5, i + 0.5], color='black', linestyle=':', linewidth=1)
+    # print('saving plot to', os.path.join(args.output, 'extract_synteny.pdf'), file=sys.stderr)
+    fig.savefig(os.path.join(args.output, 'full_synteny.pdf'))
 
 def convert_local_to_global_coords(coords, names, lengths):
     ## coords of format contig:start-end
@@ -169,12 +190,17 @@ def main(args=None):
     mums = MUMdata(args.mum_file)
     if mums.blocks is None:
         mums.blocks = find_coll_blocks(mums)
+        print('found blocks:', len(mums.blocks), file=sys.stderr)
+    else:
+        print('using provided blocks:', len(mums.blocks), file=sys.stderr)
     coords = convert_local_to_global_coords(args.range, contig_names[args.seq_idx], seq_lengths_multi[args.seq_idx])
-    mums, mum_bounds, other_coords = find_target_region(mums, coords, args.seq_idx, args.sequences)
+    coll_mums, mum_bounds, other_coords = find_target_region(mums, coords, args.seq_idx, args.sequences)
     if args.plot:
         if not args.lens:
             raise ValueError("--lengths-file is required when --plot is specified")
-        plot_extract(args, coords, mums, mum_bounds, other_coords, args.seq_idx, args.sequences, seq_lengths)
+        plot_extract(args, coords, coll_mums, mum_bounds, other_coords, args.seq_idx, args.sequences, seq_lengths)
+    if args.plot_full:
+        plot_full_synteny(args, coords, mums, mum_bounds, other_coords, args.seq_idx, args.sequences, seq_lengths)
     if args.fasta:
         extract_fasta(args, contig_names, seq_lengths_multi, other_coords, args.sequences)
     else:
