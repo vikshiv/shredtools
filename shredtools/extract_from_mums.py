@@ -8,6 +8,7 @@ import mumemto.viz_mums
 from matplotlib import pyplot as plt
 from matplotlib.collections import PolyCollection
 from tqdm.auto import tqdm
+from bisect import bisect_left
 
 def parse_arguments(args=None):
     parser = argparse.ArgumentParser(description="Shred a MUM file into smaller fragments and optionally visualize.")
@@ -17,7 +18,7 @@ def parse_arguments(args=None):
     parser.add_argument("--plot", action="store_true", help="If set, generate a visualization of the extracted region using MUMs from MUM file.")
     parser.add_argument("--plot-full", action="store_true", help="If set, generate a visualization of the extracted region using all MUMs from MUM file.")
     parser.add_argument("--fasta", action="store_true", help="If set, generate a FASTA file for each sequence that contains the target sequence. Otherwise, only write a BED file of coordinates.")
-    parser.add_argument("--output", '-o', type=str, default="output_dir", help="Output directory for shredded MUMs.")
+    parser.add_argument("--output", '-o', type=str, default="output", help="Output prefix for shreds. With --fasta, specifies directory to store shred sequences")
     parser.add_argument("--sequences", '-x', type=int, nargs='*', default=None, help="One or more sequence indices to output BED or FASTA for. By default, all sequences are included.")
     parser.add_argument('--lengths','-l', dest='lens', help='lengths file, first column is seq length in order of filelist')
     
@@ -112,7 +113,7 @@ def plot_extract(args, coords, mums, mum_bounds, other_coords, seq_idx, sequence
     ax.plot([end, end], [seq_idx - 0.5, seq_idx + 0.5], color='red', linestyle='--', linewidth=1)
     
     # print('saving plot to', os.path.join(args.output, 'extract_synteny.pdf'), file=sys.stderr)
-    fig.savefig(os.path.join(args.output, 'extract_synteny.pdf'))
+    fig.savefig(args.output + '_extract_synteny.pdf')
 
 def plot_full_synteny(args, coords, mums, mum_bounds, other_coords, seq_idx, sequences, seq_lengths):
     offsets = np.array(other_coords)
@@ -133,7 +134,7 @@ def plot_full_synteny(args, coords, mums, mum_bounds, other_coords, seq_idx, seq
         ax.plot([start_coord, start_coord], [i - 0.5, i + 0.5], color='black', linestyle=':', linewidth=1)
         ax.plot([end_coord, end_coord], [i - 0.5, i + 0.5], color='black', linestyle=':', linewidth=1)
     # print('saving plot to', os.path.join(args.output, 'extract_synteny.pdf'), file=sys.stderr)
-    fig.savefig(os.path.join(args.output, 'full_synteny.pdf'))
+    fig.savefig(args.output +'_full_synteny.pdf')
 
 def convert_local_to_global_coords(coords, names, lengths):
     ## coords of format contig:start-end
@@ -146,36 +147,52 @@ def convert_local_to_global_coords(coords, names, lengths):
 def convert_global_to_local_coords(start, end, names, lengths):
     contig, rel_offsets = find_chr((start, end), lengths)
     assert contig[0] == contig[1], f"start and end coords are in different contigs: {names[contig[0]]} and {names[contig[1]]}"
-    return f"{names[contig[0]]}:{rel_offsets[0]}-{rel_offsets[1]}"
+    return names[contig[0]], rel_offsets
     
 def find_target_region(mums, coords, seq_idx, sequences):    
     collinear_mums = [i for s, e in mums.blocks for i in range(s, e+1)]
     order = np.argsort(mums.starts[collinear_mums, seq_idx])
     coll_mums = MUMdata.from_arrays(mums.lengths[collinear_mums][order], mums.starts[collinear_mums][order], mums.strands[collinear_mums][order])
     starts = coll_mums.starts
-    mum_bounds = np.searchsorted(starts[:, seq_idx], coords)
-    mum_bounds[0] -= 1
-    print('left margin:', coords[0] - starts[mum_bounds[0], seq_idx], file=sys.stderr)
-    print('right margin:', starts[mum_bounds[1], seq_idx] - coords[1], file=sys.stderr)
-    other_coords = [(starts[mum_bounds[0], i], starts[mum_bounds[1], i]) for i in sequences]
+    left_mum_idx = bisect_left(starts[:, seq_idx], coords[0]) - 1
+    right_mum_idx = bisect_left(starts[:, seq_idx] + coll_mums.lengths, coords[1])
+    mum_bounds = (left_mum_idx, right_mum_idx)
+    ### deal with case where the requested region is within a mum on either side
+    left_mum, right_mum = coll_mums[mum_bounds[0]], coll_mums[mum_bounds[1]]
+    left_bound = left_mum.starts[seq_idx]
+    right_bound = right_mum.starts[seq_idx]
+    left_offset, right_offset = 0, 0
+    if coords[0] < left_mum.starts[seq_idx] + left_mum.length:
+        left_offset = coords[0] - left_mum.starts[seq_idx]
+    if coords[1] > right_mum.starts[seq_idx]:
+        right_offset = coords[1] - right_mum.starts[seq_idx]
+    print('left margin:', coords[0] - left_bound - left_offset, file=sys.stderr)
+    print('right margin:', right_bound + right_offset - coords[1], file=sys.stderr)
+    other_coords = [(starts[mum_bounds[0], i] + left_offset, starts[mum_bounds[1], i] + right_offset) for i in sequences]
     return coll_mums, mum_bounds, other_coords
 
 def extract_fasta(args, contig_names, seq_lengths_multi, other_coords, sequences):
     paths = get_seq_paths(args.lens)
-    for i in sequences:
+    for i in range(len(sequences)):
         p = paths[i]
         with open(p, 'r') as f:
             seq = ''.join(line.strip() for line in f if not line.startswith('>'))
-            coord_line = convert_global_to_local_coords(other_coords[i][0], other_coords[i][1], contig_names[i], seq_lengths_multi[i])
+            name, rel_offsets = convert_global_to_local_coords(other_coords[i][0], other_coords[i][1], contig_names[i], seq_lengths_multi[i])
+            coord_line = f"{name}:{rel_offsets[0]}-{rel_offsets[1]}"
             with open(os.path.join(args.output, os.path.basename(p).replace('.fa', f'.extract.fa')), 'w') as out:
                 out.write(f'>{os.path.splitext(os.path.basename(p))[0]}_{coord_line}\n{seq[other_coords[i][0] : other_coords[i][1]]}\n')
 
 def extract_bed(args, contig_names, seq_lengths_multi, other_coords, sequences):
-    pass
+    paths = get_seq_paths(args.lens)
+    bed_file = open(args.output + '.bed', 'w')
+    for i in range(len(sequences)):
+        p = paths[i]
+        name, rel_offsets = convert_global_to_local_coords(other_coords[i][0], other_coords[i][1], contig_names[i], seq_lengths_multi[i])
+        bed_file.write(f'{name}\t{rel_offsets[0]}\t{rel_offsets[1]}\t{p}\n')
 
 def main(args=None):
     args = parse_arguments(args)
-    if not os.path.exists(args.output):
+    if args.fasta and not os.path.exists(args.output):
         os.makedirs(args.output)
     seq_lengths_multi = get_sequence_lengths(args.lens, multilengths=True)
     seq_lengths = [sum(x) for x in seq_lengths_multi]
