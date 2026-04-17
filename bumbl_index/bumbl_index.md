@@ -4,14 +4,30 @@ A `.bumbl.bi` file is a **binary index** over a `.bumbl` MUM file. It stores inf
 
 All multi-byte integers are **little-endian `uint64`** unless noted otherwise.
 
-**T**he first `uint64` of every index file is **FORMAT**, which indicates the layout.
+## Index file header
 
+Every `.bumbl.bi` file starts with a fixed **4 × `uint64`** header:
 
-| `FORMAT` | Layout       |
-| -------- | ------------ |
-| `0`      | Single-index |
-| `1`      | Multi-index  |
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  FORMAT        (uint64)  Bytes: b"bumblbi" + FORMAT (1 byte)           │
+│  CHECKSUM      (uint64)  SHA-256(lengths[:min(1000,n_mums)]) → u64     │
+│  BIN_WIDTH     (uint64)  Genomic bin width, e.g. 1_000_000 bp          │
+│  NUM_SEQS      (uint64)  Number of sequences in the corresponding      │
+│                          `.bumbl` file                                 │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
+### `FORMAT`
+
+`FORMAT` is a single `uint64` whose **raw 8 bytes** (little-endian) are:
+
+- first 7 bytes: ASCII `b"bumblbi"`
+- last 1 byte: `FORMAT` (0 = single-index, 1 = multi-index)
+
+### `CHECKSUM`
+
+`CHECKSUM` is a hash of the first 1000 `.bumbl` length values, used to sanity-check that the index corresponds to the same `.bumbl` **MUM row order** as at index-build time (the index depends on that order).
 
 
 | Variant          | When to use                                                          | Coordinate system                                                    |
@@ -48,16 +64,6 @@ OPTIONAL (if FLAGS.coll_blocks)
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-### FLAGS (`uint16`, `unpack_flags`)
-
-
-| Label         | Role                                                                   |
-| ------------- | ---------------------------------------------------------------------- |
-| `partial`     | Reserved / input metadata                                              |
-| `coll_blocks` | Optional collinear-block table after strands                           |
-| `length32`    | Metadata for length encoding (loaders use `uint32` lengths by default) |
-
-
 ### Semantics
 
 - **Lengths** and **starts** are stored in **row-major MUM order**: all lengths first, then starts `(mum 0, seq 0)…(mum 0, seq N-1)`, then `(mum 1, seq 0)…`, etc.
@@ -65,34 +71,36 @@ OPTIONAL (if FLAGS.coll_blocks)
 - A start of **-1** means the MUM does not occur on that sequence.
 - **MUMdata** loads into `lengths`, `starts` (`num_mums × num_seqs`), `strands` (`bool`), and optional block metadata when `coll_blocks` is set.
 
-The `.bumbl.bi` index only stores **indices into this row order** (half-open ranges `[mum_start, mum_end)`), not raw coordinates.
+The `.bumbl.bi` index only stores **indices into this row order** (half-open ranges `[mum_start, mum_end)`), not raw coordinates. The checksum in the index is used to verify the row order in bumbl file is intact.
 
 ---
 
 ## Single-index format (`FORMAT = 0`)
 
-**Requirement:** MUM rows must be sorted by the reference column you index on, conventionally `starts[:, 0]` strictly increasing.
+**Requirement:** MUM rows must be sorted by the reference column you index on, conventionally the first sequence, strictly increasing.
 
 ### Layout
 
 ```
 HEADER
 ┌────────────────────────────────────────────────────────────────────────┐
-│  FORMAT (uint64)              Must be 0 — single-index                 │
+│  FORMAT (uint64)        b"bumblbi" + 0                                  │
+│  CHECKSUM (uint64)            See "Index file header"                  │
 │  BIN_WIDTH (uint64)           Genomic bin width, e.g. 1_000_000 bp     │
-│  NUM_BINS (uint64)            Count of OFFSET entries in DATA          │
+│  NUM_SEQS (uint64)            Number of sequences in the `.bumbl`      │
+│  SEQ_IDX (uint64)             Which `.bumbl` sequence column is indexed│
 └────────────────────────────────────────────────────────────────────────┘
 DATA
 ┌────────────────────────────────────────────────────────────────────────┐
-│  OFFSET[0] … OFFSET[NUM_BINS − 1]   First MUM row index per bin        │
+│  OFFSET[0] … OFFSET[NUM_BINS]       First MUM row index per bin        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **BIN_WIDTH**: size of each genomic bin (smaller **BIN_WIDTH** ⇒ larger index).
-- **NUM_BINS**: length of the offset vector.
-- **OFFSET[i]**: **MUM row index** (0-based) of the **first** MUM whose reference start is **≥ `i × BIN_WIDTH`**.
+- **NUM_BINS**: `len(OFFSET) - 1` (not stored explicitly).
+- **OFFSET[i]**: **MUM row index** (0-based) of the **first** MUM whose start in the indexed column (`SEQ_IDX`) is **≥ `i × BIN_WIDTH`**.
 
-To query reference interval `[s, e)` in the same coordinates:
+To query an interval `[s, e)` on the indexed sequence coordinate system:
 
 1. `bin_lo = s // BIN_WIDTH`, `bin_hi = (e − 1) // BIN_WIDTH`.
 2. MUM rows to consider lie in `[OFFSET[bin_lo], OFFSET[bin_hi + 1])` in the `.bumbl` row order.
@@ -101,14 +109,15 @@ To query reference interval `[s, e)` in the same coordinates:
 
 ## Multi-index format (`FORMAT = 1`)
 
-Use when the `.bumbl` has many sequences and each query supplies **seq_idx** and an interval in **that sequence’s** linear coordinates (consistent with your `.lengths` file). Reference reader: `get_mum_ranges` in `notebooks/bumbl_bi/compare_outputs.ipynb` and `mod_scripts/index_extract.py`.
+Use when the `.bumbl` has many sequences and each query supplies **seq_idx** and an interval in **that sequence’s** linear coordinates (consistent with your `.lengths` / manifest).
 
 ### Layout
 
 ```
 HEADER
 ┌────────────────────────────────────────────────────────────────────────┐
-│  FORMAT (uint64)              Must be 1 — multi-index                  │
+│  FORMAT (uint64)        b"bumblbi" + 1                                 │
+│  CHECKSUM (uint64)            See "Index file header"                  │
 │  BIN_WIDTH (uint64)           Bin width in per-sequence coordinates    │
 │  NUM_SEQS (uint64)            Number of sequences (documents)          │
 └────────────────────────────────────────────────────────────────────────┘
