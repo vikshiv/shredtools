@@ -5,7 +5,9 @@ Schemas: see bumbl_index.md for description
 
 from dataclasses import dataclass
 import hashlib
+import os
 import struct
+from typing import Protocol
 import urllib.error
 import urllib.request
 
@@ -198,81 +200,6 @@ def write_bumbl_index(path, index):
         f.write(index.tobytes())
 
 
-def get_bin_multi_file(index_path, seq_idx, bins):
-    """
-    Fast selective read from *.bumbl.bi. Must be multi-index.
-    Returns np.ndarray shape (n, 2), dtype=np.uint64 (zero-copy view of read bytes).
-    """
-    bin_start, bin_end = _parse_bins_arg(bins)
-    with open(index_path, "rb") as fin:
-        # header
-        fin.seek(0)
-        _format = _parse_header_word(_U64.unpack(fin.read(8))[0])
-        assert _format == 1, "Invalid FORMAT, multi-index format is type 1."
-        fin.read(8)  # checksum (uint64)
-        _bin_width = _U64.unpack(fin.read(8))[0]
-        num_seqs   = _U64.unpack(fin.read(8))[0]
-        if not (0 <= seq_idx < num_seqs):
-            raise AssertionError("invalid seq_idx")
-
-        # doc_offsets[seq_idx], doc_offsets[seq_idx+1]
-        fin.seek((_HEADER_SIZE * 8) + 8 * seq_idx)
-        doc_start, doc_end = _U64x2.unpack(fin.read(16))
-        if not (doc_start < doc_end):
-            raise AssertionError("corrupt index (doc offsets)")
-
-        # bin_num
-        fin.seek(doc_start)
-        bin_num = _U64.unpack(fin.read(8))[0]
-        ranges = []
-        for bin_idx in range(bin_start, bin_end + 1):
-            if not (0 <= bin_idx < bin_num):
-                raise AssertionError("invalid bin")
-
-            # off0, off1 (byte offsets into ranges area)
-            fin.seek(doc_start + 8 * (1 + bin_idx))
-            off0, off1 = _U64x2.unpack(fin.read(16))
-            if off1 < off0:
-                raise AssertionError("corrupt index (bin offsets)")
-
-            ranges_base = doc_start + 8 * (bin_num + 2)  # 1 + (bin_num+1)
-            byte_start = ranges_base + off0
-            byte_end   = ranges_base + off1
-
-            fin.seek(byte_start)
-            raw = fin.read(byte_end - byte_start)
-            if (len(raw) % 16) != 0:
-                raise AssertionError("corrupt index (ranges not multiple of 2*u64)")
-
-            ranges.append(np.frombuffer(raw, dtype=np.uint64).reshape(-1, 2))
-        ranges = np.concatenate(ranges, axis=0) if ranges else np.empty((0, 2), dtype=np.uint64)
-    return ranges
-
-def get_bin_single_file(index_path, bins):
-    """
-    Fast selective read from *.bumbl.bi. Must be single-index.
-    Returns np.ndarray shape (n, 2), dtype=np.uint64 (zero-copy view of read bytes).
-    """
-    bin_start, bin_end = _parse_bins_arg(bins)
-    with open(index_path, "rb") as fin:
-        # header
-        fin.seek(0)
-        _format = _parse_header_word(_U64.unpack(fin.read(8))[0])
-        assert _format == 0, "Invalid FORMAT, single-index format is type 0."
-        fin.seek(8 * 4, 1)  # checksum, bin_width, num_seqs, seq_idx
-
-        # Remaining bytes are a uint64 offsets array. For bin i, the MUM row range is:
-        # [offsets[i], offsets[i+1]).
-        offsets = np.fromfile(fin, dtype=np.uint64)
-        assert offsets.size >= 2, "index is empty."
-        bin_num = offsets.size - 1
-        assert 0 <= bin_start <= bin_end < bin_num, "invalid bin range."
-        starts = offsets[bin_start : bin_end + 1]
-        ends = offsets[bin_start + 1 : bin_end + 2]
-        return np.stack((starts, ends), axis=1)
-    
-    
-
 ####### Functions to parse a BumblBi index #######
 
 
@@ -289,6 +216,26 @@ class BumblMultiIndex:
     bin_num: np.uint64
     boundaries: np.ndarray  # uint64, shape (bin_num+1,), byte offsets into ranges section
     ranges: np.ndarray  # uint64, shape (k,2), (mum_start, mum_end) pairs
+
+    def get_bins(self, bins):
+        bin_start, bin_end = _parse_bins_arg(bins)
+        bin_num = int(self.bin_num)
+        if not (0 <= bin_start <= bin_end < bin_num):
+            raise AssertionError("invalid bin")
+
+        out = []
+        for bin_idx in range(bin_start, bin_end + 1):
+            off0 = int(self.boundaries[bin_idx])
+            off1 = int(self.boundaries[bin_idx + 1])
+            if off1 < off0:
+                raise AssertionError("corrupt index (bin offsets)")
+            if (off0 % 16) != 0 or (off1 % 16) != 0:
+                raise AssertionError("corrupt index (bin offsets not multiple of 2*u64)")
+            i0 = off0 // 16
+            i1 = off1 // 16
+            out.append(self.ranges[i0:i1])
+
+        return np.concatenate(out, axis=0) if out else np.empty((0, 2), dtype=np.uint64)
 
     def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
         n = int(self.bin_num)
@@ -322,6 +269,16 @@ class BumblSingleIndex:
     seq_idx: np.uint64
     offsets: np.ndarray  # uint64, shape (bin_num+1,)
 
+    def get_bins(self, bins):
+        bin_start, bin_end = _parse_bins_arg(bins)
+        offsets = self.offsets
+        bin_num = int(offsets.size - 1)
+        if not (0 <= bin_start <= bin_end < bin_num):
+            raise AssertionError("invalid bin range.")
+        starts = offsets[bin_start : bin_end + 1]
+        ends = offsets[bin_start + 1 : bin_end + 2]
+        return np.stack((starts, ends), axis=1)
+
     def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
         offsets = self.offsets
         n = int(offsets.size - 1)
@@ -345,30 +302,103 @@ class BumblSingleIndex:
         return None
 
 
-def parse_multi_index(index_path, seq_idx):
-    """
-    Parse a multi-index (*.bumbl.bi, FORMAT=1) into an in-memory object
-    containing only the requested document's slice.
-    """
-    with open(index_path, "rb") as fin:
-        fin.seek(0)
-        _format = _parse_header_word(_U64.unpack(fin.read(8))[0])
-        assert _format == 1, "Invalid FORMAT, multi-index format is type 1."
-        fin.read(8)  # checksum
-        bin_width = np.uint64(_U64.unpack(fin.read(8))[0])
-        num_seqs = np.uint64(_U64.unpack(fin.read(8))[0])
-        if not (0 <= int(seq_idx) < int(num_seqs)):
-            raise AssertionError("invalid seq_idx")
 
-        # doc_offsets[seq_idx], doc_offsets[seq_idx+1]
-        fin.seek((_HEADER_SIZE * 8) + 8 * int(seq_idx))
-        doc_start, doc_end = _U64x2.unpack(fin.read(16))
-        if not (doc_start < doc_end):
-            raise AssertionError("corrupt index (doc offsets)")
+def _read_range_url(url, start, nbytes):
+    req = urllib.request.Request(
+        url, headers={"Range": f"bytes={start}-{start + nbytes - 1}"}
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = resp.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f"Range request failed ({e.code}). URL may not support byte ranges."
+        ) from e
+    if len(data) != nbytes:
+        raise RuntimeError(f"Short read: wanted {nbytes} bytes @ {start}, got {len(data)}")
+    return data
 
-        fin.seek(doc_start)
-        doc_raw = fin.read(doc_end - doc_start)
 
+def _url_size(url):
+    req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            cr = resp.headers.get("Content-Range")
+            if cr is None:
+                raise RuntimeError("Missing Content-Range header")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f"Range request failed ({e.code}). URL may not support byte ranges."
+        ) from e
+    # format: "bytes 0-0/12345"
+    try:
+        return int(cr.split("/")[-1])
+    except Exception as e:
+        raise RuntimeError(f"Could not parse Content-Range: {cr!r}") from e
+
+
+class _RandomAccessReader(Protocol):
+    def read_at(self, offset: int, nbytes: int) -> bytes: ...
+    def size(self) -> int: ...
+
+
+class _FileReader:
+    def __init__(self, fin):
+        self._fin = fin
+        self._size = int(os.fstat(fin.fileno()).st_size)
+
+    def read_at(self, offset: int, nbytes: int) -> bytes:
+        self._fin.seek(int(offset))
+        data = self._fin.read(int(nbytes))
+        if len(data) != int(nbytes):
+            raise AssertionError("short read")
+        return data
+
+    def size(self) -> int:
+        return self._size
+
+
+class _UrlReader:
+    def __init__(self, url: str):
+        self._url = url
+        self._size = None
+
+    def read_at(self, offset: int, nbytes: int) -> bytes:
+        return _read_range_url(self._url, int(offset), int(nbytes))
+
+    def size(self) -> int:
+        if self._size is None:
+            self._size = _url_size(self._url)
+        return int(self._size)
+
+
+def _open_reader(src):
+    if isinstance(src, (_FileReader, _UrlReader)):
+        return src
+    is_url = isinstance(src, str) and (
+        src.startswith("http://") or src.startswith("https://")
+    )
+    if is_url:
+        return _UrlReader(src)
+    return src
+
+
+def _parse_multi_index_reader(reader: _RandomAccessReader, seq_idx):
+    header = reader.read_at(0, 8 * _HEADER_SIZE)
+    _format = _parse_header_word(np.frombuffer(header[:8], dtype=np.uint64, count=1)[0])
+    assert _format == 1, "Invalid FORMAT, multi-index format is type 1."
+    bin_width = np.frombuffer(header[16:24], dtype=np.uint64, count=1)[0]
+    num_seqs = np.frombuffer(header[24:32], dtype=np.uint64, count=1)[0]
+    if not (0 <= int(seq_idx) < int(num_seqs)):
+        raise AssertionError("invalid seq_idx")
+
+    off = (_HEADER_SIZE * 8) + 8 * int(seq_idx)
+    doc_offs = reader.read_at(off, 16)
+    doc_start, doc_end = np.frombuffer(doc_offs, dtype=np.uint64, count=2)
+    if not (int(doc_start) < int(doc_end)):
+        raise AssertionError("corrupt index (doc offsets)")
+
+    doc_raw = reader.read_at(int(doc_start), int(doc_end - doc_start))
     if len(doc_raw) < 8:
         raise AssertionError("corrupt index (doc too small)")
 
@@ -378,7 +408,9 @@ def parse_multi_index(index_path, seq_idx):
     if len(doc_raw) < header_bytes:
         raise AssertionError("corrupt index (doc truncated)")
 
-    boundaries = np.frombuffer(doc_raw, dtype=np.uint64, count=int(bin_num) + 1, offset=8)
+    boundaries = np.frombuffer(
+        doc_raw, dtype=np.uint64, count=int(bin_num) + 1, offset=8
+    )
     ranges_raw = memoryview(doc_raw)[header_bytes:]
     if (len(ranges_raw) % 16) != 0:
         raise AssertionError("corrupt index (ranges not multiple of 2*u64)")
@@ -387,98 +419,69 @@ def parse_multi_index(index_path, seq_idx):
         if len(ranges_raw)
         else np.empty((0, 2), dtype=np.uint64)
     )
-
-    # Optional integrity check: last boundary should match ranges section length.
     if boundaries.size and int(boundaries[-1]) != len(ranges_raw):
         raise AssertionError("corrupt index (boundary/range size mismatch)")
 
     return BumblMultiIndex(
         seq_idx=int(seq_idx),
-        bin_width=bin_width,
-        num_seqs=num_seqs,
+        bin_width=np.uint64(bin_width),
+        num_seqs=np.uint64(num_seqs),
         bin_num=bin_num,
         boundaries=boundaries,
         ranges=ranges,
     )
 
 
-def parse_single_index(index_path, seq_idx):
-    """
-    Parse a single-index (*.bumbl.bi, FORMAT=0) into an in-memory object.
-
-    If `seq_idx` is provided, it is validated against the value stored in the file.
-    """
-    with open(index_path, "rb") as fin:
-        fin.seek(0)
-        _format = _parse_header_word(_U64.unpack(fin.read(8))[0])
-        assert _format == 0, "Invalid FORMAT, single-index format is type 0."
-        fin.read(8)  # checksum
-        bin_width = np.uint64(_U64.unpack(fin.read(8))[0])
-        num_seqs = np.uint64(_U64.unpack(fin.read(8))[0])
-        stored_seq_idx = np.uint64(_U64.unpack(fin.read(8))[0])
-        offsets = np.fromfile(fin, dtype=np.uint64)
-
-    if offsets.size < 2:
-        raise AssertionError("index is empty.")
+def _parse_single_index_reader(reader: _RandomAccessReader, seq_idx):
+    header = reader.read_at(0, 8 * 5)
+    _format = _parse_header_word(np.frombuffer(header[:8], dtype=np.uint64, count=1)[0])
+    assert _format == 0, "Invalid FORMAT, single-index format is type 0."
+    bin_width = np.frombuffer(header[16:24], dtype=np.uint64, count=1)[0]
+    num_seqs = np.frombuffer(header[24:32], dtype=np.uint64, count=1)[0]
+    stored_seq_idx = np.frombuffer(header[32:40], dtype=np.uint64, count=1)[0]
     if seq_idx is not None and int(seq_idx) != int(stored_seq_idx):
         raise AssertionError("seq_idx mismatch for single-index")
 
+    offsets_off = 8 * 5
+    tail = reader.read_at(offsets_off, reader.size() - offsets_off)
+    offsets = np.frombuffer(tail, dtype=np.uint64).copy()
+    if offsets.size < 2:
+        raise AssertionError("index is empty.")
+
     return BumblSingleIndex(
-        bin_width=bin_width,
-        num_seqs=num_seqs,
-        seq_idx=stored_seq_idx,
+        bin_width=np.uint64(bin_width),
+        num_seqs=np.uint64(num_seqs),
+        seq_idx=np.uint64(stored_seq_idx),
         offsets=offsets,
     )
 
-def get_bin_multi(index, seq_idx, bins):
-    """
-    Query ranges from an in-memory multi-index doc slice.
 
-    Returns np.ndarray shape (n, 2), dtype=np.uint64 of (mum_start, mum_end) pairs.
-    """
-    if not isinstance(index, BumblMultiIndex):
-        raise TypeError("index must be a BumblMultiIndex (use parse_multi_index)")
-    if int(seq_idx) != int(index.seq_idx):
-        raise AssertionError("seq_idx mismatch for this parsed multi-index doc")
+def parse_index(src, seq_idx=None):
+    reader = _open_reader(src)
+    if isinstance(reader, (_UrlReader, _FileReader)):
+        r = reader
+    else:
+        fin = open(reader, "rb")
+        try:
+            r = _FileReader(fin)
+        except Exception:
+            fin.close()
+            raise
 
-    bin_start, bin_end = _parse_bins_arg(bins)
-    bin_num = int(index.bin_num)
-    if not (0 <= bin_start <= bin_end < bin_num):
-        raise AssertionError("invalid bin")
-
-    out = []
-    for bin_idx in range(bin_start, bin_end + 1):
-        off0 = int(index.boundaries[bin_idx])
-        off1 = int(index.boundaries[bin_idx + 1])
-        if off1 < off0:
-            raise AssertionError("corrupt index (bin offsets)")
-        if (off0 % 16) != 0 or (off1 % 16) != 0:
-            raise AssertionError("corrupt index (bin offsets not multiple of 2*u64)")
-        i0 = off0 // 16
-        i1 = off1 // 16
-        out.append(index.ranges[i0:i1])
-
-    return np.concatenate(out, axis=0) if out else np.empty((0, 2), dtype=np.uint64)
-
-
-def get_bin_single(index, bins):
-    """
-    Query row ranges from an in-memory single-index.
-
-    Returns np.ndarray shape (n, 2), dtype=np.uint64 of (mum_start, mum_end) row ranges.
-    """
-    if not isinstance(index, BumblSingleIndex):
-        raise TypeError("index must be a BumblSingleIndex (use parse_single_index)")
-
-    bin_start, bin_end = _parse_bins_arg(bins)
-    offsets = index.offsets
-    bin_num = int(offsets.size - 1)
-    if not (0 <= bin_start <= bin_end < bin_num):
-        raise AssertionError("invalid bin range.")
-    starts = offsets[bin_start : bin_end + 1]
-    ends = offsets[bin_start + 1 : bin_end + 2]
-    return np.stack((starts, ends), axis=1)
-
+    try:
+        index_format = _parse_header_word(
+            np.frombuffer(r.read_at(0, 8), dtype=np.uint64, count=1)[0]
+        )
+        if index_format == 0:
+            return _parse_single_index_reader(r, seq_idx=seq_idx)
+        if index_format == 1:
+            if seq_idx is None:
+                raise ValueError("seq_idx is required for multi-index")
+            return _parse_multi_index_reader(r, seq_idx=seq_idx)
+        raise AssertionError("unknown index format")
+    finally:
+        if not isinstance(reader, (_UrlReader, _FileReader)):
+            fin.close()
 
 # Version of BUMBL range helpers below (bump when layout, dtypes, or HTTP behavior changes).
 _BUMBL_RANGE_HELPERS_VERSION = 1
@@ -499,11 +502,22 @@ def parse_bumbl_range(mumfile, mum_ranges):
     start_chunks = []
     strand_chunks = []
 
-    with open(mumfile, "rb") as fh:
-        np.fromfile(fh, count=1, dtype=np.uint16)  # skip flags
-        n_seqs, n_mums = np.fromfile(fh, count=2, dtype=np.uint64)
-        n_seqs = int(n_seqs)
-        n_mums = int(n_mums)
+    reader = _open_reader(mumfile)
+    if isinstance(reader, (_UrlReader, _FileReader)):
+        r = reader
+    else:
+        fin = open(reader, "rb")
+        try:
+            r = _FileReader(fin)
+        except Exception:
+            fin.close()
+            raise
+
+    try:
+        header = r.read_at(0, 2 + 8 + 8)
+        np.frombuffer(header[:2], dtype=np.uint16, count=1)  # flags (unused)
+        n_seqs = int(np.frombuffer(header[2:10], dtype=np.uint64, count=1)[0])
+        n_mums = int(np.frombuffer(header[10:18], dtype=np.uint64, count=1)[0])
 
         lengths_pos = 2 + 8 + 8
         offsets_pos = lengths_pos + (n_mums * length_size)
@@ -522,119 +536,29 @@ def parse_bumbl_range(mumfile, mum_ranges):
             if n_sel == 0:
                 continue
 
-            fh.seek(lengths_pos + mum_start * length_size)
-            length_chunks.append(np.fromfile(fh, count=n_sel, dtype=np.uint32))
+            lengths_bytes = r.read_at(lengths_pos + mum_start * length_size, n_sel * length_size)
+            length_chunks.append(np.frombuffer(lengths_bytes, dtype=np.uint32, count=n_sel).copy())
 
-            fh.seek(offsets_pos + mum_start * n_seqs * start_size)
+            starts_off = offsets_pos + mum_start * n_seqs * start_size
+            starts_nbytes = n_sel * n_seqs * start_size
+            starts_bytes = r.read_at(starts_off, starts_nbytes)
             start_chunks.append(
-                np.fromfile(fh, count=n_sel * n_seqs, dtype=np.int64).reshape((n_sel, n_seqs))
+                np.frombuffer(starts_bytes, dtype=np.int64, count=n_sel * n_seqs)
+                .reshape((n_sel, n_seqs))
+                .copy()
             )
 
             bit0 = mum_start * n_seqs
             n_bits = n_sel * n_seqs
             byte0 = bit0 // 8
             byte1 = (bit0 + n_bits + 7) // 8
-            fh.seek(strands_pos + byte0)
-            packed = np.fromfile(fh, count=byte1 - byte0, dtype=np.uint8)
-            bits = np.unpackbits(packed)
+            packed = r.read_at(strands_pos + byte0, byte1 - byte0)
+            bits = np.unpackbits(np.frombuffer(packed, dtype=np.uint8))
             off = bit0 % 8
-            strand_chunks.append(
-                bits[off : off + n_bits].reshape((n_sel, n_seqs)).copy()
-            )
-
-    if not length_chunks:
-        lengths = np.array([], dtype=np.uint32)
-        starts = np.empty((0, n_seqs), dtype=np.int64)
-        strands = np.empty((0, n_seqs), dtype=bool)
-    else:
-        lengths = np.concatenate(length_chunks)
-        starts = np.vstack(start_chunks)
-        strands = np.vstack(strand_chunks)
-
-    return utils.MUMdata.from_arrays(lengths, starts, strands)
-
-
-def parse_bumbl_range_url(url, mum_ranges):
-    """
-    Same as parse_bumbl_range, but reads from a remote URL via HTTP Range requests.
-
-    Schema matches mumemto.utils.parse_bumbl_generator: uint16 flags, uint64 n_seqs, n_mums;
-    lengths (uint32); starts (int64); strands bit-packed row-major (mum, seq).
-
-    Requires server support for byte-range requests.
-    """
-    length_size = 4
-    start_size = 8
-
-    def _read_range(start, nbytes):
-        req = urllib.request.Request(
-            url, headers={"Range": f"bytes={start}-{start + nbytes - 1}"}
-        )
-        try:
-            with urllib.request.urlopen(req) as resp:
-                data = resp.read()
-        except urllib.error.HTTPError as e:
-            raise RuntimeError(
-                f"Range request failed ({e.code}). URL may not support byte ranges."
-            ) from e
-        if len(data) != nbytes:
-            raise RuntimeError(
-                f"Short read: wanted {nbytes} bytes @ {start}, got {len(data)}"
-            )
-        return data
-
-    header = _read_range(0, 2 + 8 + 8)
-    np.frombuffer(header[:2], dtype=np.uint16, count=1)  # flags (unused)
-    n_seqs = int(np.frombuffer(header[2:10], dtype=np.uint64, count=1)[0])
-    n_mums = int(np.frombuffer(header[10:18], dtype=np.uint64, count=1)[0])
-
-    lengths_pos = 2 + 8 + 8
-    offsets_pos = lengths_pos + (n_mums * length_size)
-    strands_pos = offsets_pos + (n_mums * n_seqs * start_size)
-
-    length_chunks = []
-    start_chunks = []
-    strand_chunks = []
-
-    for mum_start, mum_end in mum_ranges:
-        mum_start = int(mum_start)
-        mum_end = int(mum_end)
-        if mum_start < 0:
-            mum_start = n_mums + mum_start
-        if mum_end < 0:
-            mum_end = n_mums + mum_end
-        mum_start = max(0, min(mum_start, n_mums))
-        mum_end = max(mum_start, min(mum_end, n_mums))
-        n_sel = mum_end - mum_start
-        if n_sel == 0:
-            continue
-
-        lengths_bytes = _read_range(
-            lengths_pos + mum_start * length_size, n_sel * length_size
-        )
-        length_chunks.append(
-            np.frombuffer(lengths_bytes, dtype=np.uint32, count=n_sel).copy()
-        )
-
-        starts_off = offsets_pos + mum_start * n_seqs * start_size
-        starts_nbytes = n_sel * n_seqs * start_size
-        starts_bytes = _read_range(starts_off, starts_nbytes)
-        start_chunks.append(
-            np.frombuffer(starts_bytes, dtype=np.int64, count=n_sel * n_seqs)
-            .reshape((n_sel, n_seqs))
-            .copy()
-        )
-
-        bit0 = mum_start * n_seqs
-        n_bits = n_sel * n_seqs
-        byte0 = bit0 // 8
-        byte1 = (bit0 + n_bits + 7) // 8
-        packed = _read_range(strands_pos + byte0, byte1 - byte0)
-        bits = np.unpackbits(np.frombuffer(packed, dtype=np.uint8))
-        off = bit0 % 8
-        strand_chunks.append(
-            bits[off : off + n_bits].reshape((n_sel, n_seqs)).copy()
-        )
+            strand_chunks.append(bits[off : off + n_bits].reshape((n_sel, n_seqs)).copy())
+    finally:
+        if not isinstance(reader, (_UrlReader, _FileReader)):
+            fin.close()
 
     if not length_chunks:
         lengths = np.array([], dtype=np.uint32)
