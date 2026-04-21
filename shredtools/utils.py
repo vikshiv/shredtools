@@ -6,6 +6,8 @@ Schemas: see bumbl_index.md for description
 from dataclasses import dataclass
 import hashlib
 import struct
+import urllib.error
+import urllib.request
 
 import numpy as np
 import mumemto.utils as utils 
@@ -288,6 +290,28 @@ class BumblMultiIndex:
     boundaries: np.ndarray  # uint64, shape (bin_num+1,), byte offsets into ranges section
     ranges: np.ndarray  # uint64, shape (k,2), (mum_start, mum_end) pairs
 
+    def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
+        n = int(self.bin_num)
+        b = int(bin_idx)
+        if not (0 <= b < n):
+            raise AssertionError("invalid bin")
+        boundaries = self.boundaries
+        for i in range(b, -1, -1):
+            if boundaries[i] != boundaries[i + 1]:
+                return i
+        return None
+
+    def closest_nonzero_bin_right(self, bin_idx: int) -> int | None:
+        n = int(self.bin_num)
+        b = int(bin_idx)
+        if not (0 <= b < n):
+            raise AssertionError("invalid bin")
+        boundaries = self.boundaries
+        for i in range(b, n):
+            if boundaries[i] != boundaries[i + 1]:
+                return i
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class BumblSingleIndex:
@@ -297,6 +321,28 @@ class BumblSingleIndex:
     num_seqs: np.uint64
     seq_idx: np.uint64
     offsets: np.ndarray  # uint64, shape (bin_num+1,)
+
+    def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
+        offsets = self.offsets
+        n = int(offsets.size - 1)
+        b = int(bin_idx)
+        if not (0 <= b < n):
+            raise AssertionError("invalid bin")
+        for i in range(b, -1, -1):
+            if offsets[i] != offsets[i + 1]:
+                return i
+        return None
+
+    def closest_nonzero_bin_right(self, bin_idx: int) -> int | None:
+        offsets = self.offsets
+        n = int(offsets.size - 1)
+        b = int(bin_idx)
+        if not (0 <= b < n):
+            raise AssertionError("invalid bin")
+        for i in range(b, n):
+            if offsets[i] != offsets[i + 1]:
+                return i
+        return None
 
 
 def parse_multi_index(index_path, seq_idx):
@@ -433,4 +479,170 @@ def get_bin_single(index, bins):
     ends = offsets[bin_start + 1 : bin_end + 2]
     return np.stack((starts, ends), axis=1)
 
-    
+
+# Version of BUMBL range helpers below (bump when layout, dtypes, or HTTP behavior changes).
+_BUMBL_RANGE_HELPERS_VERSION = 1
+
+
+def parse_bumbl_range(mumfile, mum_ranges):
+    """
+    Load MUM rows for half-open index intervals mum_ranges[i] = [start, end).
+
+    mum_ranges: (N, 2) array; each row is [start, end) in MUM index order.
+    Negative indices count from n_mums (same rules as single-slice indexing).
+    Strands are read from the bumbl packed strand block (same layout as mumemto.utils.parse_bumbl_generator).
+    """
+    length_size = 4
+    start_size = 8
+
+    length_chunks = []
+    start_chunks = []
+    strand_chunks = []
+
+    with open(mumfile, "rb") as fh:
+        np.fromfile(fh, count=1, dtype=np.uint16)  # skip flags
+        n_seqs, n_mums = np.fromfile(fh, count=2, dtype=np.uint64)
+        n_seqs = int(n_seqs)
+        n_mums = int(n_mums)
+
+        lengths_pos = 2 + 8 + 8
+        offsets_pos = lengths_pos + (n_mums * length_size)
+        strands_pos = offsets_pos + (n_mums * n_seqs * start_size)
+
+        for mum_start, mum_end in mum_ranges:
+            mum_start = int(mum_start)
+            mum_end = int(mum_end)
+            if mum_start < 0:
+                mum_start = n_mums + mum_start
+            if mum_end < 0:
+                mum_end = n_mums + mum_end
+            mum_start = max(0, min(mum_start, n_mums))
+            mum_end = max(mum_start, min(mum_end, n_mums))
+            n_sel = mum_end - mum_start
+            if n_sel == 0:
+                continue
+
+            fh.seek(lengths_pos + mum_start * length_size)
+            length_chunks.append(np.fromfile(fh, count=n_sel, dtype=np.uint32))
+
+            fh.seek(offsets_pos + mum_start * n_seqs * start_size)
+            start_chunks.append(
+                np.fromfile(fh, count=n_sel * n_seqs, dtype=np.int64).reshape((n_sel, n_seqs))
+            )
+
+            bit0 = mum_start * n_seqs
+            n_bits = n_sel * n_seqs
+            byte0 = bit0 // 8
+            byte1 = (bit0 + n_bits + 7) // 8
+            fh.seek(strands_pos + byte0)
+            packed = np.fromfile(fh, count=byte1 - byte0, dtype=np.uint8)
+            bits = np.unpackbits(packed)
+            off = bit0 % 8
+            strand_chunks.append(
+                bits[off : off + n_bits].reshape((n_sel, n_seqs)).copy()
+            )
+
+    if not length_chunks:
+        lengths = np.array([], dtype=np.uint32)
+        starts = np.empty((0, n_seqs), dtype=np.int64)
+        strands = np.empty((0, n_seqs), dtype=bool)
+    else:
+        lengths = np.concatenate(length_chunks)
+        starts = np.vstack(start_chunks)
+        strands = np.vstack(strand_chunks)
+
+    return utils.MUMdata.from_arrays(lengths, starts, strands)
+
+
+def parse_bumbl_range_url(url, mum_ranges):
+    """
+    Same as parse_bumbl_range, but reads from a remote URL via HTTP Range requests.
+
+    Schema matches mumemto.utils.parse_bumbl_generator: uint16 flags, uint64 n_seqs, n_mums;
+    lengths (uint32); starts (int64); strands bit-packed row-major (mum, seq).
+
+    Requires server support for byte-range requests.
+    """
+    length_size = 4
+    start_size = 8
+
+    def _read_range(start, nbytes):
+        req = urllib.request.Request(
+            url, headers={"Range": f"bytes={start}-{start + nbytes - 1}"}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = resp.read()
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(
+                f"Range request failed ({e.code}). URL may not support byte ranges."
+            ) from e
+        if len(data) != nbytes:
+            raise RuntimeError(
+                f"Short read: wanted {nbytes} bytes @ {start}, got {len(data)}"
+            )
+        return data
+
+    header = _read_range(0, 2 + 8 + 8)
+    np.frombuffer(header[:2], dtype=np.uint16, count=1)  # flags (unused)
+    n_seqs = int(np.frombuffer(header[2:10], dtype=np.uint64, count=1)[0])
+    n_mums = int(np.frombuffer(header[10:18], dtype=np.uint64, count=1)[0])
+
+    lengths_pos = 2 + 8 + 8
+    offsets_pos = lengths_pos + (n_mums * length_size)
+    strands_pos = offsets_pos + (n_mums * n_seqs * start_size)
+
+    length_chunks = []
+    start_chunks = []
+    strand_chunks = []
+
+    for mum_start, mum_end in mum_ranges:
+        mum_start = int(mum_start)
+        mum_end = int(mum_end)
+        if mum_start < 0:
+            mum_start = n_mums + mum_start
+        if mum_end < 0:
+            mum_end = n_mums + mum_end
+        mum_start = max(0, min(mum_start, n_mums))
+        mum_end = max(mum_start, min(mum_end, n_mums))
+        n_sel = mum_end - mum_start
+        if n_sel == 0:
+            continue
+
+        lengths_bytes = _read_range(
+            lengths_pos + mum_start * length_size, n_sel * length_size
+        )
+        length_chunks.append(
+            np.frombuffer(lengths_bytes, dtype=np.uint32, count=n_sel).copy()
+        )
+
+        starts_off = offsets_pos + mum_start * n_seqs * start_size
+        starts_nbytes = n_sel * n_seqs * start_size
+        starts_bytes = _read_range(starts_off, starts_nbytes)
+        start_chunks.append(
+            np.frombuffer(starts_bytes, dtype=np.int64, count=n_sel * n_seqs)
+            .reshape((n_sel, n_seqs))
+            .copy()
+        )
+
+        bit0 = mum_start * n_seqs
+        n_bits = n_sel * n_seqs
+        byte0 = bit0 // 8
+        byte1 = (bit0 + n_bits + 7) // 8
+        packed = _read_range(strands_pos + byte0, byte1 - byte0)
+        bits = np.unpackbits(np.frombuffer(packed, dtype=np.uint8))
+        off = bit0 % 8
+        strand_chunks.append(
+            bits[off : off + n_bits].reshape((n_sel, n_seqs)).copy()
+        )
+
+    if not length_chunks:
+        lengths = np.array([], dtype=np.uint32)
+        starts = np.empty((0, n_seqs), dtype=np.int64)
+        strands = np.empty((0, n_seqs), dtype=bool)
+    else:
+        lengths = np.concatenate(length_chunks)
+        starts = np.vstack(start_chunks)
+        strands = np.vstack(strand_chunks)
+
+    return utils.MUMdata.from_arrays(lengths, starts, strands)
