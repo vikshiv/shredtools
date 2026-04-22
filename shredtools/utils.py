@@ -203,9 +203,6 @@ def write_bumbl_index(path, index):
 ####### Functions to parse a BumblBi index #######
 
 
-
-### Convention: only store the relevant document index in memory for a multi-index
-
 @dataclass(frozen=True, slots=True)
 class BumblMultiIndex:
     """In-memory view of one document (one seq_idx) inside a multi-index."""
@@ -259,6 +256,20 @@ class BumblMultiIndex:
                 return i
         return None
 
+    def coords_to_bins(self, coords):
+        s, e = coords
+        bw = int(self.bin_width)
+        if bw <= 0:
+            raise AssertionError("invalid bin_width")
+        max_bin = int(self.bin_num) - 1
+        bin_start = int(s) // bw
+        bin_end = int(e) // bw
+        bin_start = max(0, min(bin_start, max_bin))
+        bin_end = max(0, min(bin_end, max_bin))
+        if bin_end < bin_start:
+            bin_end = bin_start
+        return bin_start, bin_end
+
 
 @dataclass(frozen=True, slots=True)
 class BumblSingleIndex:
@@ -300,6 +311,20 @@ class BumblSingleIndex:
             if offsets[i] != offsets[i + 1]:
                 return i
         return None
+
+    def coords_to_bins(self, coords):
+        s, e = coords
+        bw = int(self.bin_width)
+        if bw <= 0:
+            raise AssertionError("invalid bin_width")
+        max_bin = int(self.offsets.size - 2)
+        bin_start = int(s) // bw
+        bin_end = int(e) // bw
+        bin_start = max(0, min(bin_start, max_bin))
+        bin_end = max(0, min(bin_end, max_bin))
+        if bin_end < bin_start:
+            bin_end = bin_start
+        return bin_start, bin_end
 
 
 
@@ -570,3 +595,59 @@ def parse_bumbl_range(mumfile, mum_ranges):
         strands = np.vstack(strand_chunks)
 
     return utils.MUMdata.from_arrays(lengths, starts, strands)
+
+
+def find_chr(starts, lengths):
+    offsets = np.cumsum(lengths)
+    contig_idx = np.searchsorted(offsets, starts, side="right")
+    left_start = np.hstack((0, offsets[:-1]))
+    rel_offsets = starts - left_start[contig_idx]
+    return contig_idx, rel_offsets
+
+
+def convert_local_to_global_coords(coords, names, lengths):
+    """Convert contig-local `contig:start-end` to global offsets."""
+    coords = coords.split(":")
+    contig = coords[0]
+    start, end = int(coords[1].split("-")[0]), int(coords[1].split("-")[1])
+    assert contig in names, f"sequence {contig} not found in indicated FASTA file"
+    offset = sum(lengths[: names.index(contig)])
+    return offset + start, offset + end
+
+
+def convert_global_to_local_coords(start, end, names, lengths):
+    contig, rel_offsets = find_chr((start, end), lengths)
+    assert contig[0] == contig[1], (
+        f"start and end coords are in different contigs: {names[contig[0]]} and {names[contig[1]]}"
+    )
+    return names[contig[0]], rel_offsets
+
+
+def get_mum_ranges_flanks(index, coords):
+    """
+    Return only the *flanking* bin ranges for `coords` on `seq_idx`.
+
+    - Uses `index.coords_to_bins(coords)` for bin math (kept in index machinery).
+    - Widens outward only: left edge searches left, right edge searches right.
+    - Only returns ranges for the left snapped bin and right snapped bin (no middle bins).
+    """
+    idx = index
+    bin_start, bin_end = idx.coords_to_bins(coords)
+
+    # widen outward only: left edge searches left, right edge searches right
+    left_bin = idx.closest_nonzero_bin_left(bin_start)
+    right_bin = idx.closest_nonzero_bin_right(bin_end)
+    if left_bin is None or right_bin is None:
+        return np.empty((0, 2), dtype=np.uint64), (None, None), (bin_start, bin_end), idx
+
+    left_bin = int(left_bin)
+    right_bin = int(right_bin)
+
+    left_ranges = idx.get_bins((left_bin, left_bin))
+    if right_bin == left_bin:
+        ranges = left_ranges
+    else:
+        right_ranges = idx.get_bins((right_bin, right_bin))
+        ranges = np.concatenate([left_ranges, right_ranges], axis=0)
+
+    return ranges, (left_bin, right_bin), (bin_start, bin_end)
