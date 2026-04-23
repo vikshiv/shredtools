@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HPRCv2 Shredtools extract</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; line-height: 1.4; }
+    body { max-width: 52rem; margin: 1rem auto; padding: 0 0.75rem; }
+    h1 { font-size: 1.6rem; margin: 0; }
+    .logo { float: right; max-height: 132px; width: auto; margin: 0 0 0.5rem 0.75rem; pointer-events: none; }
+    .clear { clear: both; }
+    .hint { font-size: 0.9rem; color: #333; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
+    .tabs { display: flex; gap: 0.5rem; margin: 0.5rem 0; }
+    .tab { padding: 0.25rem 0.6rem; border: 1px solid #ccc; background: #f7f7f7; border-radius: 4px; cursor: pointer; }
+    .tab[aria-selected="true"] { background: #fff; border-color: #888; }
+    .panel { display: none; margin: 0.25rem 0 0.75rem; }
+    .panel.active { display: block; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 0.25rem 0.4rem; font-size: 0.9rem; }
+    th { text-align: left; background: #f7f7f7; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    label { min-width: 6rem; }
+    select, input[type="number"] { min-width: 10rem; }
+    button { padding: 0.35rem 0.75rem; cursor: pointer; }
+    #status { color: #444; font-size: 0.9rem; min-height: 1.2em; }
+    #substatus { color: #666; font-size: 0.85rem; min-height: 1.1em; }
+    #out { width: 100%; box-sizing: border-box; min-height: 12rem; }
+    code { background: #f0f0f0; padding: 0.1em 0.3em; }
+    details { font-size: 0.9rem; margin: 0.75rem 0; padding: 0.5rem 0.75rem; background: #f7f7f7; border-radius: 4px; }
+    details summary { cursor: pointer; color: #222; }
+    details p { margin: 0.5rem 0 0; }
+  </style>
+</head>
+<body>
+  <img class="logo" src="shredtools_logo.png" alt="Shredtools logo" />
+  <h1>HPRCv2 Shredtools extract</h1>
+  <p class="hint">
+    <strong>BUMBL:</strong> <code>https://genome-idx.s3.amazonaws.com/mumemto/hprcv2_enhanced_merged.bumbl</code><br />
+    <strong>Index:</strong> <code>https://genome-idx.s3.amazonaws.com/mumemto/hprcv2_enhanced_merged_single.bumbl.bi</code>
+  </p>
+  <p class="hint">
+    <strong>Local use:</strong> this folder must be served over HTTP (not opened as a raw file) so the browser can load
+    <code>app.py</code> and <code>bumbl_index_utils.py</code>:
+    <code>cd hprcv2_pyodide_browser &amp;&amp; python3 -m http.server 8000</code> then open <code>http://127.0.0.1:8000/</code>
+  </p>
+  <details>
+    <summary>Host on a remote server, use from your laptop</summary>
+    <p>
+      Pyodide runs in <strong>your browser</strong>; the server only serves static files (like notebook HTML).
+      Copy this whole <code>hprcv2_pyodide_browser</code> directory to the host, then on the host run:
+    </p>
+    <p><code>cd hprcv2_pyodide_browser &amp;&amp; python3 -m http.server 8000 --bind 0.0.0.0</code></p>
+    <p>
+      <strong>Option A — SSH port forward (recommended):</strong> on the host bind to loopback only:
+      <code>python3 -m http.server 8000 --bind 127.0.0.1</code> then on your laptop:
+      <code>ssh -N -L 8000:127.0.0.1:8000 you@remote</code> and open <code>http://127.0.0.1:8000/</code> in a local browser.
+    </p>
+    <p>
+      <strong>Option B — direct URL:</strong> if your network allows, open <code>http://&lt;remote-ip&gt;:8000/</code> (and open
+      firewall / security group for that port). Prefer HTTPS and auth in front of the static files if the page is exposed.
+    </p>
+  </details>
+  <div class="clear"></div>
+
+  <p class="hint" id="lengthsHint">Loading bundled lengths…</p>
+
+  <div class="row">
+    <label for="genome">Genome</label>
+    <select id="genome" disabled></select>
+  </div>
+
+  <div class="row">
+    <label for="contig">Contig</label>
+    <select id="contig" disabled></select>
+  </div>
+
+  <div class="row">
+    <label for="start">Start</label>
+    <input type="number" id="start" value="0" min="0" step="1" disabled />
+    <label for="end">End</label>
+    <input type="number" id="end" value="1000" min="0" step="1" disabled />
+  </div>
+
+  <div class="row">
+    <button type="button" id="run" disabled>Run</button>
+  </div>
+
+  <p id="status">Loading Pyodide…</p>
+  <p id="substatus"></p>
+
+  <details id="seqDetails">
+    <summary id="seqSummary" class="hint">Sequences: loading…</summary>
+    <div class="row" style="margin-top:0.5rem;">
+      <button type="button" id="seqAll">Show all</button>
+      <button type="button" id="seqNone">Hide all</button>
+      <input type="text" id="seqFilter" placeholder="filter (e.g. HG002)" style="flex:1 1 12rem; min-width: 12rem;" />
+    </div>
+    <div id="seqList" style="max-height: 220px; overflow: auto; border: 1px solid #ddd; padding: 0.5rem; border-radius: 4px;"></div>
+  </details>
+
+  <p class="hint" id="bounds"></p>
+  <div class="tabs" role="tablist" aria-label="Output view">
+    <button class="tab" id="tabTable" role="tab" aria-selected="true" aria-controls="panelTable" type="button">Table</button>
+    <button class="tab" id="tabBed" role="tab" aria-selected="false" aria-controls="panelBed" type="button">BED</button>
+  </div>
+  <div id="panelTable" class="panel active" role="tabpanel" aria-labelledby="tabTable">
+    <table aria-label="Intervals">
+      <thead>
+        <tr>
+          <th>contig</th>
+          <th>start</th>
+          <th>end</th>
+        </tr>
+      </thead>
+      <tbody id="bedTableBody">
+        <tr><td colspan="3" class="hint">Run a query to populate.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div id="panelBed" class="panel" role="tabpanel" aria-labelledby="tabBed">
+    <label for="out"><strong>BED</strong> (copy from below)</label>
+    <textarea id="out" class="mono" readonly placeholder="Run a query to fill BED lines here."></textarea>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js"></script>
+  <script type="module">
+    const $ = (id) => document.getElementById(id);
+    const t0 = performance.now();
+    const status = (t, sub = "") => {
+      $("status").textContent = t;
+      $("substatus").textContent = sub;
+    };
+    const secs = (tStart = t0) => ((performance.now() - tStart) / 1000).toFixed(1) + "s";
+
+    function prettyGenome(label) {
+      // Standard: GENOME#HAP_NUM#CONTIG -> GENOME_hapHAP_NUM
+      const s = String(label ?? "");
+      const parts = s.split("#");
+      if (parts.length >= 2) return `${parts[0]}_hap${parts[1]}`;
+      return s;
+    }
+
+    function prettyContig(label) {
+      // Standard: GENOME#HAP_NUM#CONTIG -> CONTIG
+      const s = String(label ?? "");
+      const parts = s.split("#");
+      if (parts.length >= 3) return parts.slice(2).join("#");
+      return s;
+    }
+
+    function setActiveTab(which) {
+      const isTable = which === "table";
+      $("tabTable").setAttribute("aria-selected", String(isTable));
+      $("tabBed").setAttribute("aria-selected", String(!isTable));
+      $("panelTable").classList.toggle("active", isTable);
+      $("panelBed").classList.toggle("active", !isTable);
+    }
+
+    $("tabTable").addEventListener("click", () => setActiveTab("table"));
+    $("tabBed").addEventListener("click", () => setActiveTab("bed"));
+
+    function renderBedTable(bedText) {
+      const body = $("bedTableBody");
+      body.innerHTML = "";
+      const lines = String(bedText || "").split("\n").filter((l) => l.trim().length > 0);
+      if (lines.length === 0) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 3;
+        td.className = "hint";
+        td.textContent = "No output.";
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+      }
+      for (const line of lines) {
+        const parts = line.split("\t");
+        const tr = document.createElement("tr");
+        for (let i = 0; i < 3; i++) {
+          const td = document.createElement("td");
+          td.textContent = parts[i] ?? "";
+          tr.appendChild(td);
+        }
+        body.appendChild(tr);
+      }
+    }
+
+    status("Loading Pyodide…", `elapsed ${secs()}`);
+    const pyodide = await loadPyodide();
+    // No micropip installs needed: we vendor the tiny mumemto subset we need.
+    const base = new URL(".", import.meta.url).href;
+    status("Loading app code…", `fetching local scripts (elapsed ${secs()})`);
+    const uRes = await fetch(new URL("bumbl_index_utils.py", base));
+    const aRes = await fetch(new URL("app.py", base));
+    if (!uRes.ok) throw new Error("Could not load bumbl_index_utils.py (serve this folder over HTTP, not file://).");
+    if (!aRes.ok) throw new Error("Could not load app.py.");
+    const [uText, aText] = [await uRes.text(), await aRes.text()];
+    pyodide.FS.writeFile("/bumbl_index_utils.py", uText);
+    pyodide.FS.writeFile("/app.py", aText);
+    status("Initializing Python…", `importing app (elapsed ${secs()})`);
+    await pyodide.runPythonAsync(`
+import sys
+if "/" not in sys.path:
+    sys.path.insert(0, "/")
+    `);
+    await pyodide.runPythonAsync("import app");
+    status("Ready.", `elapsed ${secs()}`);
+
+    let manifest = null;
+    let selectedSeqs = null; // Set<number>; null means not initialized yet
+    let lastRows = null;
+    let lastMeta = null;
+
+    async function initFromLengthsInFS() {
+      status("Parsing lengths…", `building dropdowns (elapsed ${secs()})`);
+      const jsonStr = String(
+        await pyodide.runPythonAsync(`import app; app.describe_ui("/data.lengths")`)
+      );
+      manifest = JSON.parse(jsonStr);
+      fillGenomeOptions();
+      syncContigOptions();
+      initSeqPicker();
+      $("start").disabled = false;
+      $("end").disabled = false;
+      $("run").disabled = false;
+      $("lengthsHint").textContent = "Lengths loaded.";
+      status("Lengths loaded. Set interval and click Run.", `elapsed ${secs()}`);
+    }
+
+    function updateSeqSummary() {
+      const n = manifest?.genomes?.length ?? 0;
+      const selN = selectedSeqs ? selectedSeqs.size : 0;
+      const all = selN === n;
+      $("seqSummary").textContent = all ? `Sequences: all (${n})` : `Sequences: ${selN}/${n}`;
+    }
+
+    function applySeqFilterToOutput() {
+      if (!lastRows) return;
+      const keep = selectedSeqs ? selectedSeqs : new Set(manifest.genomes.map((g) => g.seq_idx));
+      const rows = lastRows.filter((r) => keep.has(r.seq_idx));
+      const bedText = rows.map((r) => `${r.contig}\t${r.start}\t${r.end}\t.\n`).join("");
+      $("out").value = bedText;
+      renderBedTable(bedText);
+    }
+
+    function renderSeqList() {
+      const q = String($("seqFilter").value || "").toLowerCase().trim();
+      const list = $("seqList");
+      list.innerHTML = "";
+      const frag = document.createDocumentFragment();
+      for (const g of manifest.genomes) {
+        const label = prettyGenome(g.label);
+        if (q && !label.toLowerCase().includes(q)) continue;
+        const id = `seq_${g.seq_idx}`;
+        const row = document.createElement("div");
+        row.style.display = "flex";
+        row.style.alignItems = "center";
+        row.style.gap = "0.4rem";
+        row.style.margin = "0.15rem 0";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.id = id;
+        cb.checked = selectedSeqs.has(g.seq_idx);
+        cb.addEventListener("change", () => {
+          if (cb.checked) selectedSeqs.add(g.seq_idx);
+          else selectedSeqs.delete(g.seq_idx);
+          updateSeqSummary();
+          applySeqFilterToOutput();
+        });
+        const lab = document.createElement("label");
+        lab.htmlFor = id;
+        lab.textContent = label;
+        row.appendChild(cb);
+        row.appendChild(lab);
+        frag.appendChild(row);
+      }
+      list.appendChild(frag);
+    }
+
+    function initSeqPicker() {
+      const n = manifest.genomes.length;
+      selectedSeqs = new Set();
+      for (let i = 0; i < n; i++) selectedSeqs.add(manifest.genomes[i].seq_idx);
+      updateSeqSummary();
+      renderSeqList();
+
+      $("seqAll").onclick = () => {
+        selectedSeqs = new Set(manifest.genomes.map((g) => g.seq_idx));
+        updateSeqSummary();
+        renderSeqList();
+        applySeqFilterToOutput();
+      };
+      $("seqNone").onclick = () => {
+        selectedSeqs = new Set();
+        updateSeqSummary();
+        renderSeqList();
+        applySeqFilterToOutput();
+      };
+      $("seqFilter").oninput = () => renderSeqList();
+    }
+
+    function fillGenomeOptions() {
+      const sel = $("genome");
+      sel.innerHTML = "";
+      for (const g of manifest.genomes) {
+        const o = document.createElement("option");
+        o.value = String(g.seq_idx);
+        o.textContent = `${prettyGenome(g.label)} (seq ${g.seq_idx})`;
+        sel.appendChild(o);
+      }
+      sel.disabled = false;
+    }
+
+    function syncContigOptions() {
+      const gi = parseInt($("genome").value, 10);
+      const g = manifest.genomes.find((x) => x.seq_idx === gi);
+      const sel = $("contig");
+      sel.innerHTML = "";
+      for (const c of g.contigs) {
+        const o = document.createElement("option");
+        o.value = c;
+        o.textContent = prettyContig(c);
+        sel.appendChild(o);
+      }
+      sel.disabled = false;
+    }
+
+    $("genome").addEventListener("change", () => {
+      if (!manifest) return;
+      syncContigOptions();
+      if (selectedSeqs) renderSeqList();
+      const seqIdx = parseInt($("genome").value, 10);
+      // Warm the bumbl index for this genome so subsequent Runs are faster.
+      (async () => {
+        const w0 = performance.now();
+        status("Loading genome index…", `seq ${seqIdx} (elapsed ${secs(w0)})`);
+        try {
+          await pyodide.runPythonAsync(`
+import app
+await app.warm_index(${seqIdx})
+          `);
+          status("Ready.", `index cached for seq ${seqIdx}`);
+        } catch (e) {
+          status("Error", String(e?.message ?? e));
+        }
+      })();
+    });
+
+    $("run").addEventListener("click", async () => {
+      if (!manifest) {
+        status("Still loading…");
+        return;
+      }
+      const seqIdx = parseInt($("genome").value, 10);
+      const contig = $("contig").value;
+      const start = Number($("start").value);
+      const end = Number($("end").value);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) {
+        status("Invalid start/end (need start < end).");
+        return;
+      }
+      const rangeStr = `${contig}:${start}-${end}`;
+      const q0 = performance.now();
+      status("Querying…", `HTTP Range reads to S3 (query ${secs(q0)})`);
+      $("out").value = "";
+      $("bounds").textContent = "";
+      renderBedTable("");
+      try {
+        const resultJson = String(
+          await pyodide.runPythonAsync(`
+import app
+await app.run_with_bounds("/data.lengths", ${seqIdx}, ${JSON.stringify(rangeStr)}, None)
+          `)
+        );
+        const result = JSON.parse(resultJson);
+        lastRows = result.rows ?? [];
+        lastMeta = result;
+        applySeqFilterToOutput();
+        const b = [];
+        if (result.bounds) {
+          b.push(`Bounds (selected genome): ${result.bounds.contig}:${result.bounds.start}-${result.bounds.end}`);
+        }
+        if (result.margins) {
+          b.push(`Margins: left ${result.margins.left}, right ${result.margins.right}`);
+        }
+        $("bounds").textContent = b.join(" | ");
+        status("Done.", `query ${secs(q0)}`);
+        setActiveTab("table");
+      } catch (err) {
+        const msg = err?.message ?? String(err);
+        status("Error", msg);
+        $("out").value = msg;
+        renderBedTable("");
+        lastRows = null;
+        lastMeta = null;
+      }
+    });
+
+    // Try to auto-load a default lengths file served next to index.html.
+    (async () => {
+      try {
+        const lengthsUrl = new URL("hprcv2_enhanced_merged.lengths", base);
+        status("Loading lengths…", `fetching default lengths (elapsed ${secs()})`);
+        const res = await fetch(lengthsUrl);
+        if (!res.ok) {
+          $("lengthsHint").textContent = "Bundled lengths file is missing.";
+          status("Error", "Bundled lengths file is missing.");
+          return;
+        }
+        const buf = await res.arrayBuffer();
+        pyodide.FS.writeFile("/data.lengths", new Uint8Array(buf));
+        await initFromLengthsInFS();
+      } catch (e) {
+        $("lengthsHint").textContent = "Could not load bundled lengths file.";
+        status("Error", "Could not load bundled lengths file.");
+      }
+    })();
+  </script>
+</body>
+</html>
