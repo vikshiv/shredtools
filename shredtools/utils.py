@@ -220,19 +220,15 @@ class BumblMultiIndex:
         if not (0 <= bin_start <= bin_end < bin_num):
             raise AssertionError("invalid bin")
 
-        out = []
-        for bin_idx in range(bin_start, bin_end + 1):
-            off0 = int(self.boundaries[bin_idx])
-            off1 = int(self.boundaries[bin_idx + 1])
-            if off1 < off0:
-                raise AssertionError("corrupt index (bin offsets)")
-            if (off0 % 16) != 0 or (off1 % 16) != 0:
-                raise AssertionError("corrupt index (bin offsets not multiple of 2*u64)")
-            i0 = off0 // 16
-            i1 = off1 // 16
-            out.append(self.ranges[i0:i1])
-
-        return np.concatenate(out, axis=0) if out else np.empty((0, 2), dtype=np.uint64)
+        off0 = int(self.boundaries[bin_start])
+        off1 = int(self.boundaries[bin_end + 1])
+        if off1 < off0:
+            raise AssertionError("corrupt index (bin offsets)")
+        if (off0 % 16) != 0 or (off1 % 16) != 0:
+            raise AssertionError("corrupt index (bin offsets not multiple of 2*u64)")
+        i0 = off0 // 16
+        i1 = off1 // 16
+        return self.ranges[i0:i1]
 
     def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
         n = int(self.bin_num)
@@ -256,19 +252,11 @@ class BumblMultiIndex:
                 return i
         return None
 
-    def coords_to_bins(self, coords):
-        s, e = coords
+    def coord_to_bin(self, coord) -> int:
         bw = int(self.bin_width)
-        if bw <= 0:
-            raise AssertionError("invalid bin_width")
         max_bin = int(self.bin_num) - 1
-        bin_start = int(s) // bw
-        bin_end = int(e) // bw
-        bin_start = max(0, min(bin_start, max_bin))
-        bin_end = max(0, min(bin_end, max_bin))
-        if bin_end < bin_start:
-            bin_end = bin_start
-        return bin_start, bin_end
+        b = int(coord) // bw
+        return max(0, min(b, max_bin))
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,36 +300,12 @@ class BumblSingleIndex:
                 return i
         return None
 
-    def coords_to_bins(self, coords):
-        s, e = coords
+    def coord_to_bin(self, coord) -> int:
         bw = int(self.bin_width)
-        if bw <= 0:
-            raise AssertionError("invalid bin_width")
         max_bin = int(self.offsets.size - 2)
-        bin_start = int(s) // bw
-        bin_end = int(e) // bw
-        bin_start = max(0, min(bin_start, max_bin))
-        bin_end = max(0, min(bin_end, max_bin))
-        if bin_end < bin_start:
-            bin_end = bin_start
-        return bin_start, bin_end
+        b = int(coord) // bw
+        return max(0, min(b, max_bin))
 
-
-
-def _read_range_url(url, start, nbytes):
-    req = urllib.request.Request(
-        url, headers={"Range": f"bytes={start}-{start + nbytes - 1}"}
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            data = resp.read()
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(
-            f"Range request failed ({e.code}). URL may not support byte ranges."
-        ) from e
-    if len(data) != nbytes:
-        raise RuntimeError(f"Short read: wanted {nbytes} bytes @ {start}, got {len(data)}")
-    return data
 
 
 def _url_size(url):
@@ -389,7 +353,21 @@ class _UrlReader:
         self._size = None
 
     def read_at(self, offset: int, nbytes: int) -> bytes:
-        return _read_range_url(self._url, int(offset), int(nbytes))
+        start = int(offset)
+        n = int(nbytes)
+        req = urllib.request.Request(
+            self._url, headers={"Range": f"bytes={start}-{start + n - 1}"}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = resp.read()
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(
+                f"Range request failed ({e.code}). URL may not support byte ranges."
+            ) from e
+        if len(data) != n:
+            raise RuntimeError(f"Short read: wanted {n} bytes @ {start}, got {len(data)}")
+        return data
 
     def size(self) -> int:
         if self._size is None:
@@ -627,12 +605,14 @@ def get_mum_ranges_flanks(index, coords):
     """
     Return only the *flanking* bin ranges for `coords` on `seq_idx`.
 
-    - Uses `index.coords_to_bins(coords)` for bin math (kept in index machinery).
+    - Uses `index.coord_to_bin(coord)` for bin math (kept in index machinery).
     - Widens outward only: left edge searches left, right edge searches right.
     - Only returns ranges for the left snapped bin and right snapped bin (no middle bins).
     """
     idx = index
-    bin_start, bin_end = idx.coords_to_bins(coords)
+    s, e = coords
+    bin_start = idx.coord_to_bin(s)
+    bin_end = idx.coord_to_bin(e)
 
     # widen outward only: left edge searches left, right edge searches right
     left_bin = idx.closest_nonzero_bin_left(bin_start)
@@ -643,11 +623,11 @@ def get_mum_ranges_flanks(index, coords):
     left_bin = int(left_bin)
     right_bin = int(right_bin)
 
-    left_ranges = idx.get_bins((left_bin, left_bin))
+    left_ranges = idx.get_bins(left_bin)
     if right_bin == left_bin:
         ranges = left_ranges
     else:
-        right_ranges = idx.get_bins((right_bin, right_bin))
+        right_ranges = idx.get_bins(right_bin)
         ranges = np.concatenate([left_ranges, right_ranges], axis=0)
 
     return ranges, (left_bin, right_bin), (bin_start, bin_end)
