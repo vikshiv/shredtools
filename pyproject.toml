@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shredtools"
+version = "0.0.1"
+description = "Utilities for manipulating the pangenome coordinate system with multi-MUMs"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[tool.setuptools]
+packages = ["shredtools"]
+
