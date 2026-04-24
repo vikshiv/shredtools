@@ -203,9 +203,15 @@ async def run_with_bounds(
     except ValueError:
         self_i = 0
     b0, b1 = other_coords[self_i]
-    contig, rel = sutils.convert_global_to_local_coords(
-        b0, b1, contig_names[seq_idx], seq_lengths_multi[seq_idx]
-    )
+    try:
+        contig, rel = sutils.convert_global_to_local_coords(
+            b0, b1, contig_names[seq_idx], seq_lengths_multi[seq_idx]
+        )
+    except AssertionError as e:
+        # This happens when the *requested region itself* spans contigs on the selected genome
+        # (e.g. end runs off the contig). Return a clean error instead of a Pyodide traceback.
+        msg = e.args[0] if e.args else str(e)
+        raise ValueError(f"Selected-genome region spans multiple contigs: {msg}") from None
     left_margin, right_margin = compute_margins(mums, coords, seq_idx)
 
     return json.dumps(

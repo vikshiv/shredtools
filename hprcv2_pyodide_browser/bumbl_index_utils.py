@@ -499,7 +499,9 @@ def convert_local_to_global_coords(coords, names, lengths):
 def convert_global_to_local_coords(start, end, names, lengths):
     contig, rel_offsets = find_chr((start, end), lengths)
     if contig[0] != contig[1]:
-        raise ValueError(
+        # Match shredtools/utils.py exception type/message so callers can consistently
+        # detect and handle split-contig projections.
+        raise AssertionError(
             f"start and end coords are in different contigs: {names[contig[0]]} and {names[contig[1]]}"
         )
     return names[contig[0]], rel_offsets

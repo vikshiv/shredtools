@@ -92,20 +92,19 @@
   </div>
 
   <div class="row">
+    <label for="start">Start</label>
+    <input type="number" id="start" value="0" min="0" step="1" disabled />
+    <label for="end">End</label>
+    <input type="number" id="end" value="1000" min="0" step="1" disabled />
+  </div>
+
+  <div class="row">
     <span class="hint" style="flex: 1 1 auto; text-align: center;">— OR —</span>
   </div>
 
   <div class="row">
     <label for="region">Region</label>
     <input id="region" type="text" placeholder="chr13:32,315,474-32,400,266" disabled style="flex: 1 1 20rem; min-width: 20rem;" />
-    <button type="button" id="useRegion" disabled>Use region</button>
-  </div>
-
-  <div class="row">
-    <label for="start">Start</label>
-    <input type="number" id="start" value="0" min="0" step="1" disabled />
-    <label for="end">End</label>
-    <input type="number" id="end" value="1000" min="0" step="1" disabled />
   </div>
 
   <div class="row">
@@ -312,6 +311,7 @@ if "/" not in sys.path:
     };
     let syncingBuildGenome = false;
     let suppressGeneClear = false;
+    let suppressRegionSync = false;
 
     function clearGeneIfUserEdit() {
       if (suppressGeneClear) return;
@@ -402,23 +402,44 @@ if "/" not in sys.path:
       return { ok: true, contig, start: Math.trunc(start), end: Math.trunc(end) };
     }
 
-    function applyRegionFromInput() {
-      if (!manifest) return;
-      clearGeneIfUserEdit();
-      const parsed = parseRegion($("region").value);
-      if (!parsed.ok) {
-        status("Invalid region.", parsed.error);
-        return;
+    function updateRegionFromFields() {
+      if (suppressRegionSync) return;
+      const contigRaw = String($("contig").value || "");
+      const contig = prettyContig(contigRaw);
+      const start = String($("start").value || "").trim();
+      const end = String($("end").value || "").trim();
+      if (!contig || !start || !end) return;
+      const sNum = Number(start);
+      const eNum = Number(end);
+      if (!Number.isFinite(sNum) || !Number.isFinite(eNum) || sNum >= eNum) return;
+      suppressRegionSync = true;
+      try {
+        $("region").value = `${contig}:${Math.trunc(sNum)}-${Math.trunc(eNum)}`;
+      } finally {
+        queueMicrotask(() => {
+          suppressRegionSync = false;
+        });
       }
+    }
+
+    function maybeUpdateFieldsFromRegionLive() {
+      if (suppressRegionSync) return;
+      const txt = String($("region").value || "").trim();
+      if (!txt) return;
+      const parsed = parseRegion(txt);
+      if (!parsed.ok) return; // allow partial typing without fighting the user
       const contigWanted = ensureContigValue(parsed.contig);
-      if (!contigWanted) {
-        status("Invalid contig for selected genome.", String(parsed.contig));
-        return;
+      if (!contigWanted) return;
+      suppressRegionSync = true;
+      try {
+        $("contig").value = contigWanted;
+        $("start").value = String(parsed.start);
+        $("end").value = String(parsed.end);
+      } finally {
+        queueMicrotask(() => {
+          suppressRegionSync = false;
+        });
       }
-      $("contig").value = contigWanted;
-      $("start").value = String(parsed.start);
-      $("end").value = String(parsed.end);
-      status("Region applied.", `${prettyContig(contigWanted)}:${parsed.start}-${parsed.end}`);
     }
 
     function applyGene(gene) {
@@ -440,6 +461,7 @@ if "/" not in sys.path:
         return;
       }
       suppressGeneClear = true;
+      suppressRegionSync = true;
       try {
         $("contig").value = contigWanted;
         $("start").value = String(hit.start);
@@ -448,6 +470,9 @@ if "/" not in sys.path:
         // let the current call stack finish (change/input events) before re-enabling clears
         queueMicrotask(() => {
           suppressGeneClear = false;
+          suppressRegionSync = false;
+          // Now that sync is re-enabled, update Region to match the gene-selected interval.
+          updateRegionFromFields();
         });
       }
       status("Interval set from gene.", `${g} → ${contigWanted}:${hit.start}-${hit.end}`);
@@ -465,7 +490,6 @@ if "/" not in sys.path:
       $("start").disabled = false;
       $("end").disabled = false;
       $("region").disabled = false;
-      $("useRegion").disabled = false;
       $("run").disabled = false;
       $("lengthsHint").textContent = "Lengths loaded.";
       status("Lengths loaded. Set interval and click Run.", `elapsed ${secs()}`);
@@ -625,12 +649,22 @@ await app.warm_index(${seqIdx})
       applyGene($("geneQuery").value);
     });
 
-    $("useRegion").addEventListener("click", () => applyRegionFromInput());
-
-    $("region").addEventListener("input", () => clearGeneIfUserEdit());
-    $("contig").addEventListener("change", () => clearGeneIfUserEdit());
-    $("start").addEventListener("input", () => clearGeneIfUserEdit());
-    $("end").addEventListener("input", () => clearGeneIfUserEdit());
+    $("region").addEventListener("input", () => {
+      clearGeneIfUserEdit();
+      maybeUpdateFieldsFromRegionLive();
+    });
+    $("contig").addEventListener("change", () => {
+      clearGeneIfUserEdit();
+      updateRegionFromFields();
+    });
+    $("start").addEventListener("input", () => {
+      clearGeneIfUserEdit();
+      updateRegionFromFields();
+    });
+    $("end").addEventListener("input", () => {
+      clearGeneIfUserEdit();
+      updateRegionFromFields();
+    });
 
     $("run").addEventListener("click", async () => {
       if (!manifest) {
