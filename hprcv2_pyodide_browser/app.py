@@ -1,6 +1,7 @@
 # HPRCv2 region browser — same data path as mod_scripts/index_extract.py (no CLI, no files out).
 import json
 from bisect import bisect_left
+import re
 
 import bumbl_index_utils as sutils
 
@@ -162,13 +163,31 @@ async def run_with_bounds(
     mums = await sutils.parse_bumbl_range(BUMBL_URL, ranges)
     _mum_bounds, other_coords = find_target_region(mums, coords, seq_idx, sequences)
     rows = []
+    unavailable = []
+    _span_re = re.compile(r"start and end coords are in different contigs:\s+(.+?)\s+and\s+(.+)$")
     for i, seq in enumerate(sequences):
-        name, rel_offsets = sutils.convert_global_to_local_coords(
-            other_coords[i][0],
-            other_coords[i][1],
-            contig_names[int(seq)],
-            seq_lengths_multi[int(seq)],
-        )
+        try:
+            name, rel_offsets = sutils.convert_global_to_local_coords(
+                other_coords[i][0],
+                other_coords[i][1],
+                contig_names[int(seq)],
+                seq_lengths_multi[int(seq)],
+            )
+        except AssertionError as e:
+            msg = e.args[0] if e.args else str(e)
+            m = _span_re.search(str(msg))
+            c1, c2 = (m.group(1), m.group(2)) if m else ("", "")
+            label = contig_names[int(seq)][0] if contig_names[int(seq)] else f"seq_{int(seq)}"
+            unavailable.append(
+                {
+                    "seq_idx": int(seq),
+                    "label": label,
+                    "contig_a": str(c1),
+                    "contig_b": str(c2),
+                    "reason": str(msg),
+                }
+            )
+            continue
         rows.append(
             {
                 "seq_idx": int(seq),
@@ -194,5 +213,6 @@ async def run_with_bounds(
             "rows": rows,
             "bounds": {"contig": contig, "start": int(rel[0]), "end": int(rel[1])},
             "margins": {"left": left_margin, "right": right_margin},
+            "unavailable": unavailable,
         }
     )

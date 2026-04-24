@@ -92,6 +92,16 @@
   </div>
 
   <div class="row">
+    <span class="hint" style="flex: 1 1 auto; text-align: center;">— OR —</span>
+  </div>
+
+  <div class="row">
+    <label for="region">Region</label>
+    <input id="region" type="text" placeholder="chr13:32,315,474-32,400,266" disabled style="flex: 1 1 20rem; min-width: 20rem;" />
+    <button type="button" id="useRegion" disabled>Use region</button>
+  </div>
+
+  <div class="row">
     <label for="start">Start</label>
     <input type="number" id="start" value="0" min="0" step="1" disabled />
     <label for="end">End</label>
@@ -119,24 +129,40 @@
   <div class="tabs" role="tablist" aria-label="Output view">
     <button class="tab" id="tabTable" role="tab" aria-selected="true" aria-controls="panelTable" type="button">Table</button>
     <button class="tab" id="tabBed" role="tab" aria-selected="false" aria-controls="panelBed" type="button">BED</button>
+    <button class="tab" id="tabUnavailable" role="tab" aria-selected="false" aria-controls="panelUnavailable" type="button">Unavailable</button>
   </div>
   <div id="panelTable" class="panel active" role="tabpanel" aria-labelledby="tabTable">
     <table aria-label="Intervals">
       <thead>
         <tr>
+          <th>genome</th>
           <th>contig</th>
           <th>start</th>
           <th>end</th>
         </tr>
       </thead>
       <tbody id="bedTableBody">
-        <tr><td colspan="3" class="hint">Run a query to populate.</td></tr>
+        <tr><td colspan="4" class="hint">Run a query to populate.</td></tr>
       </tbody>
     </table>
   </div>
   <div id="panelBed" class="panel" role="tabpanel" aria-labelledby="tabBed">
     <label for="out"><strong>BED</strong> (copy from below)</label>
     <textarea id="out" class="mono" readonly placeholder="Run a query to fill BED lines here."></textarea>
+  </div>
+  <div id="panelUnavailable" class="panel" role="tabpanel" aria-labelledby="tabUnavailable">
+    <table aria-label="Unavailable assemblies">
+      <thead>
+        <tr>
+          <th>genome</th>
+          <th>Contig 1</th>
+          <th>Contig 2</th>
+        </tr>
+      </thead>
+      <tbody id="unavailTableBody">
+        <tr><td colspan="3" class="hint">Assemblies spanning multiple contigs will be listed here.</td></tr>
+      </tbody>
+    </table>
   </div>
 
   <script src="https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js"></script>
@@ -167,35 +193,77 @@
 
     function setActiveTab(which) {
       const isTable = which === "table";
+      const isBed = which === "bed";
+      const isUnavail = which === "unavailable";
       $("tabTable").setAttribute("aria-selected", String(isTable));
-      $("tabBed").setAttribute("aria-selected", String(!isTable));
+      $("tabBed").setAttribute("aria-selected", String(isBed));
+      $("tabUnavailable").setAttribute("aria-selected", String(isUnavail));
       $("panelTable").classList.toggle("active", isTable);
-      $("panelBed").classList.toggle("active", !isTable);
+      $("panelBed").classList.toggle("active", isBed);
+      $("panelUnavailable").classList.toggle("active", isUnavail);
     }
 
     $("tabTable").addEventListener("click", () => setActiveTab("table"));
     $("tabBed").addEventListener("click", () => setActiveTab("bed"));
+    $("tabUnavailable").addEventListener("click", () => setActiveTab("unavailable"));
 
-    function renderBedTable(bedText) {
+    function renderIntervalsTable(rows) {
       const body = $("bedTableBody");
       body.innerHTML = "";
-      const lines = String(bedText || "").split("\n").filter((l) => l.trim().length > 0);
-      if (lines.length === 0) {
+      const rr = Array.isArray(rows) ? rows : [];
+      if (rr.length === 0) {
         const tr = document.createElement("tr");
         const td = document.createElement("td");
-        td.colSpan = 3;
+        td.colSpan = 4;
         td.className = "hint";
         td.textContent = "No output.";
         tr.appendChild(td);
         body.appendChild(tr);
         return;
       }
-      for (const line of lines) {
-        const parts = line.split("\t");
+      for (const r of rr) {
+        const raw = String(r?.contig ?? "");
+        const genome = prettyGenome(raw);
+        const contig = prettyContig(raw);
         const tr = document.createElement("tr");
-        for (let i = 0; i < 3; i++) {
+        const tdG = document.createElement("td");
+        tdG.textContent = genome;
+        const tdC = document.createElement("td");
+        tdC.textContent = contig;
+        const tdS = document.createElement("td");
+        tdS.textContent = String(r?.start ?? "");
+        const tdE = document.createElement("td");
+        tdE.textContent = String(r?.end ?? "");
+        tr.appendChild(tdG);
+        tr.appendChild(tdC);
+        tr.appendChild(tdS);
+        tr.appendChild(tdE);
+        body.appendChild(tr);
+      }
+    }
+
+    function renderUnavailableTable(unavailable) {
+      const body = $("unavailTableBody");
+      body.innerHTML = "";
+      const rows = Array.isArray(unavailable) ? unavailable : [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 3;
+        td.className = "hint";
+        td.textContent = "None.";
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+      }
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        const genome = prettyGenome(r?.label ?? `seq_${r?.seq_idx ?? ""}`);
+        const c1 = String(r?.contig_a ?? "");
+        const c2 = String(r?.contig_b ?? "");
+        for (const v of [genome, c1, c2]) {
           const td = document.createElement("td");
-          td.textContent = parts[i] ?? "";
+          td.textContent = v;
           tr.appendChild(td);
         }
         body.appendChild(tr);
@@ -227,6 +295,7 @@ if "/" not in sys.path:
     let selectedSeqs = null; // Set<number>; null means not initialized yet
     let lastRows = null;
     let lastMeta = null;
+    let lastUnavailable = null;
     let geneIndex = null; // { [gene: string]: Array<{contig,start,end,label}> }
 
     const buildToSeqIdx = {
@@ -242,6 +311,12 @@ if "/" not in sys.path:
       "GRCh38": "annotations.genes.grch38.json",
     };
     let syncingBuildGenome = false;
+    let suppressGeneClear = false;
+
+    function clearGeneIfUserEdit() {
+      if (suppressGeneClear) return;
+      if ($("geneQuery").value) $("geneQuery").value = "";
+    }
 
     function setGeneStatus(msg) {
       $("geneStatus").textContent = msg || "";
@@ -314,6 +389,38 @@ if "/" not in sys.path:
       }
     }
 
+    function parseRegion(text) {
+      const s = String(text || "").trim();
+      // Accept UCSC-like contig:start-end with optional commas/underscores/spaces.
+      const m = /^([^:]+)\s*:\s*([0-9][0-9,_]*)\s*-\s*([0-9][0-9,_]*)\s*$/.exec(s);
+      if (!m) return { ok: false, error: "Expected CONTIG:START-END" };
+      const contig = m[1].trim();
+      const start = Number(String(m[2]).replace(/[,_]/g, ""));
+      const end = Number(String(m[3]).replace(/[,_]/g, ""));
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return { ok: false, error: "Start/end must be numbers" };
+      if (start < 0 || end < 0 || start >= end) return { ok: false, error: "Need start < end (and both >= 0)" };
+      return { ok: true, contig, start: Math.trunc(start), end: Math.trunc(end) };
+    }
+
+    function applyRegionFromInput() {
+      if (!manifest) return;
+      clearGeneIfUserEdit();
+      const parsed = parseRegion($("region").value);
+      if (!parsed.ok) {
+        status("Invalid region.", parsed.error);
+        return;
+      }
+      const contigWanted = ensureContigValue(parsed.contig);
+      if (!contigWanted) {
+        status("Invalid contig for selected genome.", String(parsed.contig));
+        return;
+      }
+      $("contig").value = contigWanted;
+      $("start").value = String(parsed.start);
+      $("end").value = String(parsed.end);
+      status("Region applied.", `${prettyContig(contigWanted)}:${parsed.start}-${parsed.end}`);
+    }
+
     function applyGene(gene) {
       const g = String(gene || "").trim();
       if (!g) return;
@@ -332,9 +439,17 @@ if "/" not in sys.path:
         status("Contig not available for selected genome.", String(hit.contig));
         return;
       }
-      $("contig").value = contigWanted;
-      $("start").value = String(hit.start);
-      $("end").value = String(hit.end);
+      suppressGeneClear = true;
+      try {
+        $("contig").value = contigWanted;
+        $("start").value = String(hit.start);
+        $("end").value = String(hit.end);
+      } finally {
+        // let the current call stack finish (change/input events) before re-enabling clears
+        queueMicrotask(() => {
+          suppressGeneClear = false;
+        });
+      }
       status("Interval set from gene.", `${g} → ${contigWanted}:${hit.start}-${hit.end}`);
     }
 
@@ -349,6 +464,8 @@ if "/" not in sys.path:
       initSeqPicker();
       $("start").disabled = false;
       $("end").disabled = false;
+      $("region").disabled = false;
+      $("useRegion").disabled = false;
       $("run").disabled = false;
       $("lengthsHint").textContent = "Lengths loaded.";
       status("Lengths loaded. Set interval and click Run.", `elapsed ${secs()}`);
@@ -369,7 +486,7 @@ if "/" not in sys.path:
       const rows = lastRows.filter((r) => keep.has(r.seq_idx));
       const bedText = rows.map((r) => `${r.contig}\t${r.start}\t${r.end}\t.\n`).join("");
       $("out").value = bedText;
-      renderBedTable(bedText);
+      renderIntervalsTable(rows);
     }
 
     function renderSeqList() {
@@ -508,15 +625,40 @@ await app.warm_index(${seqIdx})
       applyGene($("geneQuery").value);
     });
 
+    $("useRegion").addEventListener("click", () => applyRegionFromInput());
+
+    $("region").addEventListener("input", () => clearGeneIfUserEdit());
+    $("contig").addEventListener("change", () => clearGeneIfUserEdit());
+    $("start").addEventListener("input", () => clearGeneIfUserEdit());
+    $("end").addEventListener("input", () => clearGeneIfUserEdit());
+
     $("run").addEventListener("click", async () => {
       if (!manifest) {
         status("Still loading…");
         return;
       }
       const seqIdx = parseInt($("genome").value, 10);
-      const contig = $("contig").value;
-      const start = Number($("start").value);
-      const end = Number($("end").value);
+      let contig = $("contig").value;
+      let start = Number($("start").value);
+      let end = Number($("end").value);
+
+      // If Region is present + valid, prefer it over the separate fields.
+      const regionText = String($("region").value || "").trim();
+      if (regionText) {
+        const parsed = parseRegion(regionText);
+        if (!parsed.ok) {
+          status("Invalid region.", parsed.error);
+          return;
+        }
+        const contigWanted = ensureContigValue(parsed.contig);
+        if (!contigWanted) {
+          status("Invalid contig for selected genome.", String(parsed.contig));
+          return;
+        }
+        contig = contigWanted;
+        start = parsed.start;
+        end = parsed.end;
+      }
       if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) {
         status("Invalid start/end (need start < end).");
         return;
@@ -526,7 +668,8 @@ await app.warm_index(${seqIdx})
       status("Querying…", `HTTP Range reads to S3 (query ${secs(q0)})`);
       $("out").value = "";
       $("bounds").textContent = "";
-      renderBedTable("");
+      renderIntervalsTable([]);
+      renderUnavailableTable([]);
       try {
         const resultJson = String(
           await pyodide.runPythonAsync(`
@@ -537,7 +680,9 @@ await app.run_with_bounds("/data.lengths", ${seqIdx}, ${JSON.stringify(rangeStr)
         const result = JSON.parse(resultJson);
         lastRows = result.rows ?? [];
         lastMeta = result;
+        lastUnavailable = result.unavailable ?? [];
         applySeqFilterToOutput();
+        renderUnavailableTable(lastUnavailable);
         const b = [];
         if (result.bounds) {
           b.push(`Bounds (selected genome): ${result.bounds.contig}:${result.bounds.start}-${result.bounds.end}`);
@@ -552,9 +697,11 @@ await app.run_with_bounds("/data.lengths", ${seqIdx}, ${JSON.stringify(rangeStr)
         const msg = err?.message ?? String(err);
         status("Error", msg);
         $("out").value = msg;
-        renderBedTable("");
+        renderIntervalsTable([]);
+        renderUnavailableTable([]);
         lastRows = null;
         lastMeta = null;
+        lastUnavailable = null;
       }
     });
 
