@@ -71,6 +71,21 @@
     <select id="genome" disabled></select>
   </div>
 
+  <div class="row" id="buildRow" style="display:none;">
+    <label for="build">Build</label>
+    <select id="build" disabled>
+      <option value="CHM13v2.0">CHM13v2.0</option>
+      <option value="GRCh38">GRCh38</option>
+    </select>
+    <span class="hint" id="geneStatus"></span>
+  </div>
+
+  <div class="row" id="geneRow" style="display:none;">
+    <label for="geneQuery">Gene</label>
+    <input id="geneQuery" list="geneList" placeholder="Search gene (e.g. BRCA1)" disabled style="flex: 1 1 16rem; min-width: 16rem;" />
+    <datalist id="geneList"></datalist>
+  </div>
+
   <div class="row">
     <label for="contig">Contig</label>
     <select id="contig" disabled></select>
@@ -212,6 +227,116 @@ if "/" not in sys.path:
     let selectedSeqs = null; // Set<number>; null means not initialized yet
     let lastRows = null;
     let lastMeta = null;
+    let geneIndex = null; // { [gene: string]: Array<{contig,start,end,label}> }
+
+    const buildToSeqIdx = {
+      "CHM13v2.0": 0,
+      "GRCh38": 11,
+    };
+    const seqIdxToBuild = {
+      0: "CHM13v2.0",
+      11: "GRCh38",
+    };
+    const buildToGeneJson = {
+      "CHM13v2.0": "annotations.genes.chm13.json",
+      "GRCh38": "annotations.genes.grch38.json",
+    };
+    let syncingBuildGenome = false;
+
+    function setGeneStatus(msg) {
+      $("geneStatus").textContent = msg || "";
+    }
+
+    async function loadGeneIndexForBuild(build) {
+      const buildKey = String(build || "");
+      const rel = buildToGeneJson[buildKey];
+      if (!rel) {
+        geneIndex = null;
+        setGeneStatus("Unknown build.");
+        return;
+      }
+      try {
+        setGeneStatus("Loading genes…");
+        const res = await fetch(new URL(rel, base));
+        if (!res.ok) throw new Error(`fetch failed (${res.status})`);
+        const parsed = await res.json();
+        const idx = parsed?.[buildKey] ?? null;
+        if (!idx || typeof idx !== "object") throw new Error("missing build key in JSON");
+        geneIndex = idx;
+        const n = Object.keys(geneIndex).length;
+        setGeneStatus(`Loaded ${n.toLocaleString()} genes.`);
+        fillGeneDatalist();
+      } catch (e) {
+        geneIndex = null;
+        setGeneStatus(`Gene load error: ${String(e?.message ?? e)}`);
+      }
+    }
+
+    function fillGeneDatalist() {
+      const dl = $("geneList");
+      dl.innerHTML = "";
+      if (!geneIndex) return;
+      const genes = Object.keys(geneIndex);
+      genes.sort();
+      const frag = document.createDocumentFragment();
+      for (const g of genes) {
+        const opt = document.createElement("option");
+        opt.value = g;
+        frag.appendChild(opt);
+      }
+      dl.appendChild(frag);
+    }
+
+    function ensureContigValue(contig) {
+      const sel = $("contig");
+      const want = String(contig || "");
+      const hasChr = want.startsWith("chr");
+      const alt = hasChr ? want.slice(3) : `chr${want}`;
+      for (const o of Array.from(sel.options)) {
+        const v = String(o.value || "");
+        const pc = prettyContig(v);
+        if (v === want || v === alt || pc === want || pc === alt) return v;
+      }
+      return null;
+    }
+
+    function setGeneUiVisible(visible) {
+      const show = !!visible;
+      $("buildRow").style.display = show ? "" : "none";
+      $("geneRow").style.display = show ? "" : "none";
+      $("build").disabled = !show;
+      $("geneQuery").disabled = !show;
+      if (!show) {
+        $("geneQuery").value = "";
+        $("geneList").innerHTML = "";
+        geneIndex = null;
+        setGeneStatus("");
+      }
+    }
+
+    function applyGene(gene) {
+      const g = String(gene || "").trim();
+      if (!g) return;
+      if (!geneIndex) {
+        status("Genes not loaded yet.");
+        return;
+      }
+      const hits = geneIndex[g];
+      if (!hits || hits.length === 0) {
+        status("Gene not found.", g);
+        return;
+      }
+      const hit = hits[0];
+      const contigWanted = ensureContigValue(hit.contig);
+      if (!contigWanted) {
+        status("Contig not available for selected genome.", String(hit.contig));
+        return;
+      }
+      $("contig").value = contigWanted;
+      $("start").value = String(hit.start);
+      $("end").value = String(hit.end);
+      status("Interval set from gene.", `${g} → ${contigWanted}:${hit.start}-${hit.end}`);
+    }
 
     async function initFromLengthsInFS() {
       status("Parsing lengths…", `building dropdowns (elapsed ${secs()})`);
@@ -227,6 +352,8 @@ if "/" not in sys.path:
       $("run").disabled = false;
       $("lengthsHint").textContent = "Lengths loaded.";
       status("Lengths loaded. Set interval and click Run.", `elapsed ${secs()}`);
+      // Gene UI visibility + loading is driven by the selected genome (seq_idx).
+      $("genome").dispatchEvent(new Event("change"));
     }
 
     function updateSeqSummary() {
@@ -332,6 +459,20 @@ if "/" not in sys.path:
       syncContigOptions();
       if (selectedSeqs) renderSeqList();
       const seqIdx = parseInt($("genome").value, 10);
+      const build = seqIdxToBuild[seqIdx];
+      const eligible = build != null;
+      setGeneUiVisible(eligible);
+      if (eligible && !syncingBuildGenome) {
+        syncingBuildGenome = true;
+        try {
+          $("build").value = build;
+        } finally {
+          syncingBuildGenome = false;
+        }
+        // Load genes for this build (async) and clear any previous gene selection.
+        $("geneQuery").value = "";
+        loadGeneIndexForBuild(build);
+      }
       // Warm the bumbl index for this genome so subsequent Runs are faster.
       (async () => {
         const w0 = performance.now();
@@ -346,6 +487,25 @@ await app.warm_index(${seqIdx})
           status("Error", String(e?.message ?? e));
         }
       })();
+    });
+
+    $("build").addEventListener("change", async () => {
+      if (!manifest) return;
+      const build = $("build").value;
+      const seqIdx = buildToSeqIdx[build];
+      if (!syncingBuildGenome && Number.isFinite(seqIdx)) {
+        syncingBuildGenome = true;
+        $("genome").value = String(seqIdx);
+        $("genome").dispatchEvent(new Event("change"));
+        syncingBuildGenome = false;
+      }
+      $("geneQuery").value = "";
+      await loadGeneIndexForBuild(build);
+    });
+
+    $("geneQuery").addEventListener("change", () => {
+      if (!manifest) return;
+      applyGene($("geneQuery").value);
     });
 
     $("run").addEventListener("click", async () => {
