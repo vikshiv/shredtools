@@ -717,6 +717,11 @@ await app.run_with_bounds("/data.lengths", ${seqIdx}, ${JSON.stringify(rangeStr)
         lastUnavailable = result.unavailable ?? [];
         applySeqFilterToOutput();
         renderUnavailableTable(lastUnavailable);
+        let mumSliceSummary = "";
+        if (result.mum_slices) {
+          mumSliceSummary = `Loaded ${result.mum_slices.mums} MUMs, ${result.mum_slices.chunks} chunks`;
+          console.log(`[shredtools] mum slices: ${mumSliceSummary}`);
+        }
         const b = [];
         if (result.bounds) {
           b.push(`Bounds (selected genome): ${result.bounds.contig}:${result.bounds.start}-${result.bounds.end}`);
@@ -725,7 +730,7 @@ await app.run_with_bounds("/data.lengths", ${seqIdx}, ${JSON.stringify(rangeStr)
           b.push(`Margins: left ${result.margins.left}, right ${result.margins.right}`);
         }
         $("bounds").textContent = b.join(" | ");
-        status("Done.", `query ${secs(q0)}`);
+        status("Done.", `query ${secs(q0)}${mumSliceSummary ? ` | ${mumSliceSummary}` : ""}`);
         setActiveTab("table");
       } catch (err) {
         const msg = err?.message ?? String(err);

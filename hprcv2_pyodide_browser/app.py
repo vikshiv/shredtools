@@ -2,24 +2,58 @@
 import json
 from bisect import bisect_left
 import re
+from bisect import bisect_right
 
 import bumbl_index_utils as sutils
 
 BUMBL_BI_URL = "https://genome-idx.s3.amazonaws.com/mumemto/hprcv2_enhanced_merged.bumbl.bi"
 BUMBL_URL = "https://genome-idx.s3.amazonaws.com/mumemto/hprcv2_enhanced_merged.bumbl"
 
+# Caches (modest memory): lengths metadata and indices reused across runs.
+_LENGTHS_META = {}  # lengths_path -> (seq_lengths_multi, contig_names, num_seqs)
+_INDEX_BY_SEQ = {}  # seq_idx -> parsed index for BUMBL_BI_URL
+
+
+def _get_lengths_meta(lengths_path: str):
+    meta = _LENGTHS_META.get(lengths_path)
+    if meta is not None:
+        return meta
+    seq_lengths_multi = sutils.get_sequence_lengths(lengths_path, multilengths=True)
+    contig_names = sutils.get_contig_names(lengths_path)
+    meta = (seq_lengths_multi, contig_names, len(seq_lengths_multi))
+    _LENGTHS_META[lengths_path] = meta
+    return meta
+
+
+async def _get_index(seq_idx: int):
+    idx = _INDEX_BY_SEQ.get(int(seq_idx))
+    if idx is not None:
+        return idx, True
+    idx = await sutils.parse_index(BUMBL_BI_URL, seq_idx=int(seq_idx))
+    _INDEX_BY_SEQ[int(seq_idx)] = idx
+    return idx, False
+
+
 async def warm_index(seq_idx: int) -> bool:
     """Preload the index for seq_idx; used on genome dropdown change."""
-    await sutils.parse_index(BUMBL_BI_URL, seq_idx=int(seq_idx))
+    idx = await sutils.parse_index(BUMBL_BI_URL, seq_idx=int(seq_idx))
+    _INDEX_BY_SEQ[int(seq_idx)] = idx
     return True
 
 
-def find_target_region(coll_mums, coords, seq_idx, sequences):
+def find_target_region(coll_mums, coords, seq_idx, sequences, right_key=None):
     """From mod_scripts/index_extract.py (no stderr prints in browser)."""
+    n = int(coll_mums.num_mums)
+    if n <= 0:
+        raise ValueError("No MUMs loaded for this query (empty range slice).")
     starts_col = coll_mums.starts_col(seq_idx)
     left_mum_idx = bisect_left(starts_col, coords[0]) - 1
-    right_key = [starts_col[i] + int(coll_mums.lengths[i]) for i in range(coll_mums.num_mums)]
+    if right_key is None:
+        right_key = [starts_col[i] + int(coll_mums.lengths[i]) for i in range(n)]
     right_mum_idx = bisect_left(right_key, coords[1])
+    # Clamp to valid row indices; bisect can yield -1 or n depending on coords.
+    left_mum_idx = max(0, min(int(left_mum_idx), n - 1))
+    right_mum_idx = max(0, min(int(right_mum_idx), n - 1))
     mum_bounds = (left_mum_idx, right_mum_idx)
     left_mum, right_mum = coll_mums[mum_bounds[0]], coll_mums[mum_bounds[1]]
     left_offset, right_offset = 0, 0
@@ -37,12 +71,18 @@ def find_target_region(coll_mums, coords, seq_idx, sequences):
     return mum_bounds, other_coords
 
 
-def compute_margins(coll_mums, coords, seq_idx):
+def compute_margins(coll_mums, coords, seq_idx, right_key=None):
     """Match the left/right margin prints from mod_scripts/index_extract.py."""
+    n = int(coll_mums.num_mums)
+    if n <= 0:
+        raise ValueError("No MUMs loaded for this query (empty range slice).")
     starts_col = coll_mums.starts_col(seq_idx)
     left_mum_idx = bisect_left(starts_col, coords[0]) - 1
-    right_key = [starts_col[i] + int(coll_mums.lengths[i]) for i in range(coll_mums.num_mums)]
+    if right_key is None:
+        right_key = [starts_col[i] + int(coll_mums.lengths[i]) for i in range(n)]
     right_mum_idx = bisect_left(right_key, coords[1])
+    left_mum_idx = max(0, min(int(left_mum_idx), n - 1))
+    right_mum_idx = max(0, min(int(right_mum_idx), n - 1))
     left_mum, right_mum = coll_mums[left_mum_idx], coll_mums[right_mum_idx]
 
     left_bound = left_mum.starts[seq_idx]
@@ -57,6 +97,76 @@ def compute_margins(coll_mums, coords, seq_idx):
     left_margin = coords[0] - left_bound - left_offset
     right_margin = right_bound + right_offset - coords[1]
     return int(left_margin), int(right_margin)
+
+
+def _bracket_ok(mums, coords, seq_idx, right_key):
+    """
+    Return (left_ok, right_ok) indicating whether this MUM slice contains
+    a MUM row before coords[0] and a MUM row whose end is after coords[1].
+    """
+    n = int(mums.num_mums)
+    if n <= 0:
+        return False, False
+    starts_col = mums.starts_col(seq_idx)
+    li = bisect_left(starts_col, coords[0]) - 1
+    ri = bisect_left(right_key, coords[1])
+    return (li >= 0), (ri < n)
+
+
+async def _get_mums_expanding(idx, coords, seq_idx, max_steps: int = 8):
+    """
+    Fetch MUMs for bins around coords, expanding outward until bracketing holds.
+
+    Starts with the same flanking-bin logic (<=2 bins), then widens left/right
+    to additional non-empty bins if needed.
+    """
+    s, e = coords
+    bin_start = idx.coord_to_bin(s)
+    bin_end = idx.coord_to_bin(e)
+
+    left_bin = idx.closest_nonzero_bin_left(bin_start)
+    right_bin = idx.closest_nonzero_bin_right(bin_end)
+    if left_bin is None or right_bin is None:
+        return None, [], (bin_start, bin_end)
+    left_bin = int(left_bin)
+    right_bin = int(right_bin)
+
+    steps = 0
+    while True:
+        ranges = await idx.get_bins(left_bin)
+        if right_bin != left_bin:
+            ranges = ranges + (await idx.get_bins(right_bin))
+        if not ranges:
+            return None, [], (bin_start, bin_end)
+
+        mums = await sutils.parse_bumbl_range(BUMBL_URL, ranges)
+        starts_col = mums.starts_col(seq_idx)
+        right_key = [starts_col[i] + int(mums.lengths[i]) for i in range(int(mums.num_mums))]
+        left_ok, right_ok = _bracket_ok(mums, coords, seq_idx, right_key)
+        if left_ok and right_ok:
+            return (mums, right_key), ranges, (bin_start, bin_end)
+
+        if steps >= int(max_steps):
+            # Give up with a clear message rather than crashing.
+            raise ValueError(
+                f"Could not bracket region from flanking bins after {max_steps} expansions "
+                f"(bin_start={bin_start}, bin_end={bin_end}, left_bin={left_bin}, right_bin={right_bin})."
+            )
+
+        # Expand outward only on the side(s) that are missing.
+        if not left_ok:
+            lb2 = idx.closest_nonzero_bin_left(left_bin - 1)
+            if lb2 is None:
+                left_ok = True  # cannot expand further; stop trying left
+            else:
+                left_bin = int(lb2)
+        if not right_ok:
+            rb2 = idx.closest_nonzero_bin_right(right_bin + 1)
+            if rb2 is None:
+                right_ok = True
+            else:
+                right_bin = int(rb2)
+        steps += 1
 
 
 def format_bed(
@@ -79,9 +189,7 @@ def format_bed(
 
 def describe_ui(lengths_path: str) -> str:
     """JSON for genome / contig dropdowns. Call after writing lengths to MEMFS."""
-    seq_lengths_multi = sutils.get_sequence_lengths(lengths_path, multilengths=True)
-    contig_names = sutils.get_contig_names(lengths_path)
-    n = len(seq_lengths_multi)
+    seq_lengths_multi, contig_names, n = _get_lengths_meta(lengths_path)
     genomes = []
     for i in range(n):
         cnames = contig_names[i]
@@ -106,9 +214,7 @@ async def run(
     Returns BED text or raises with a clear error message.
     `range_str` is chr:start-end (same as -r in index_extract).
     """
-    seq_lengths_multi = sutils.get_sequence_lengths(lengths_path, multilengths=True)
-    contig_names = sutils.get_contig_names(lengths_path)
-    num_seqs = len(seq_lengths_multi)
+    seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta(lengths_path)
     if not (0 <= seq_idx < num_seqs):
         raise ValueError(f"seq_idx {seq_idx} invalid (N = {num_seqs})")
     if sequences is not None and any(s >= num_seqs for s in sequences):
@@ -119,14 +225,14 @@ async def run(
     coords = sutils.convert_local_to_global_coords(
         range_str, contig_names[seq_idx], seq_lengths_multi[seq_idx]
     )
-    idx = await sutils.parse_index(BUMBL_BI_URL, seq_idx=seq_idx)
-    ranges, _snapped_bins, requested_bins = await sutils.get_mum_ranges_flanks(idx, coords)
-    if len(ranges) == 0:
+    idx, _cached = await _get_index(seq_idx)
+    got, ranges, requested_bins = await _get_mums_expanding(idx, coords, seq_idx)
+    if got is None:
         raise ValueError(
             f"No MUM ranges for bins {requested_bins} (index could not find flanking bins)"
         )
-    mums = await sutils.parse_bumbl_range(BUMBL_URL, ranges)
-    _mum_bounds, other_coords = find_target_region(mums, coords, seq_idx, sequences)
+    mums, right_key = got
+    _mum_bounds, other_coords = find_target_region(mums, coords, seq_idx, sequences, right_key=right_key)
     return format_bed(
         contig_names, seq_lengths_multi, other_coords, sequences, path_placeholder="."
     )
@@ -142,9 +248,7 @@ async def run_with_bounds(
     Like `run`, but returns JSON: { bed: str, bounds: { contig, start, end } }.
     Bounds are the extracted interval for the selected genome (seq_idx), in contig-local coords.
     """
-    seq_lengths_multi = sutils.get_sequence_lengths(lengths_path, multilengths=True)
-    contig_names = sutils.get_contig_names(lengths_path)
-    num_seqs = len(seq_lengths_multi)
+    seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta(lengths_path)
     if not (0 <= seq_idx < num_seqs):
         raise ValueError(f"seq_idx {seq_idx} invalid (N = {num_seqs})")
     # For the browser app we always compute all sequences; UI-side filtering is handled in JS.
@@ -153,15 +257,18 @@ async def run_with_bounds(
     coords = sutils.convert_local_to_global_coords(
         range_str, contig_names[seq_idx], seq_lengths_multi[seq_idx]
     )
-    idx = await sutils.parse_index(BUMBL_BI_URL, seq_idx=seq_idx)
-    ranges, _snapped_bins, requested_bins = await sutils.get_mum_ranges_flanks(idx, coords)
-    if len(ranges) == 0:
+    idx, index_cached = await _get_index(seq_idx)
+    got, ranges, requested_bins = await _get_mums_expanding(idx, coords, seq_idx)
+    if got is None:
         raise ValueError(
             f"No MUM ranges for bins {requested_bins} (index could not find flanking bins)"
         )
+    # Each element of `ranges` is a half-open [mum_start, mum_end) slice.
+    mum_chunks = int(len(ranges))
+    mums_sliced = int(sum(int(b) - int(a) for a, b in ranges))
 
-    mums = await sutils.parse_bumbl_range(BUMBL_URL, ranges)
-    _mum_bounds, other_coords = find_target_region(mums, coords, seq_idx, sequences)
+    mums, right_key = got
+    _mum_bounds, other_coords = find_target_region(mums, coords, seq_idx, sequences, right_key=right_key)
     rows = []
     unavailable = []
     _span_re = re.compile(r"start and end coords are in different contigs:\s+(.+?)\s+and\s+(.+)$")
@@ -212,7 +319,7 @@ async def run_with_bounds(
         # (e.g. end runs off the contig). Return a clean error instead of a Pyodide traceback.
         msg = e.args[0] if e.args else str(e)
         raise ValueError(f"Selected-genome region spans multiple contigs: {msg}") from None
-    left_margin, right_margin = compute_margins(mums, coords, seq_idx)
+    left_margin, right_margin = compute_margins(mums, coords, seq_idx, right_key=right_key)
 
     return json.dumps(
         {
@@ -220,5 +327,6 @@ async def run_with_bounds(
             "bounds": {"contig": contig, "start": int(rel[0]), "end": int(rel[1])},
             "margins": {"left": left_margin, "right": right_margin},
             "unavailable": unavailable,
+            "mum_slices": {"chunks": mum_chunks, "mums": mums_sliced},
         }
     )
