@@ -72,6 +72,28 @@ def find_target_region(coll_mums, coords, seq_idx, sequences):
     return mum_bounds, other_coords
 
 
+def safe_convert_global_to_local_coords(
+    global_start,
+    global_end,
+    contig_name,
+    seq_lengths_multi,
+    *,
+    on_fail_prefix,
+    path_for_msg,
+):
+    try:
+        return sutils.convert_global_to_local_coords(
+            global_start, global_end, contig_name, seq_lengths_multi
+        )
+    except AssertionError as e:
+        reason = e.args[0] if e.args else str(e)
+        print(
+            f"Skipping {on_fail_prefix} for {os.path.basename(path_for_msg)}: {reason}",
+            file=sys.stderr,
+        )
+        return None
+
+
 
 def extract_fasta(output_prefix, lengths_file, contig_names, seq_lengths_multi, other_coords, sequences):
     paths = mutils.get_seq_paths(lengths_file)
@@ -79,33 +101,37 @@ def extract_fasta(output_prefix, lengths_file, contig_names, seq_lengths_multi, 
         p = paths[i]
         with open(p, 'r') as f:
             seq = ''.join(line.strip() for line in f if not line.startswith('>'))
-            try:
-                name, rel_offsets = sutils.convert_global_to_local_coords(other_coords[i][0], other_coords[i][1], contig_names[i], seq_lengths_multi[i])
-                coord_line = f"{name}:{rel_offsets[0]}-{rel_offsets[1]}"
-                with open(os.path.join(output_prefix, os.path.basename(p).replace('.fa', f'.extract.fa')), 'w') as out:
-                    out.write(f'>{os.path.splitext(os.path.basename(p))[0]}_{coord_line}\n{seq[other_coords[i][0] : other_coords[i][1]]}\n')
-            except AssertionError as e:
-                reason = e.args[0] if e.args else str(e)
-                print(
-                    f"Skipping FASTA for {os.path.basename(p)}: {reason}",
-                    file=sys.stderr,
-                )
+            converted = safe_convert_global_to_local_coords(
+                other_coords[i][0],
+                other_coords[i][1],
+                contig_names[i],
+                seq_lengths_multi[i],
+                on_fail_prefix="FASTA",
+                path_for_msg=p,
+            )
+            if converted is None:
                 continue
+            name, rel_offsets = converted
+            coord_line = f"{name}:{rel_offsets[0]}-{rel_offsets[1]}"
+            with open(os.path.join(output_prefix, os.path.basename(p).replace('.fa', f'.extract.fa')), 'w') as out:
+                out.write(f'>{os.path.splitext(os.path.basename(p))[0]}_{coord_line}\n{seq[other_coords[i][0] : other_coords[i][1]]}\n')
 
 def extract_bed(output_prefix, lengths_file, contig_names, seq_lengths_multi, other_coords, sequences):
     paths = mutils.get_seq_paths(lengths_file)
     with open(output_prefix + ".bed", "w") as bed_file:
         for i in range(len(sequences)):
             p = paths[i]
-            try:
-                name, rel_offsets = sutils.convert_global_to_local_coords(other_coords[i][0], other_coords[i][1], contig_names[i], seq_lengths_multi[i])
-            except AssertionError as e:
-                reason = e.args[0] if e.args else str(e)
-                print(
-                    f"Skipping BED line for {os.path.basename(p)}: {reason}",
-                    file=sys.stderr,
-                )
+            converted = safe_convert_global_to_local_coords(
+                other_coords[i][0],
+                other_coords[i][1],
+                contig_names[i],
+                seq_lengths_multi[i],
+                on_fail_prefix="BED line",
+                path_for_msg=p,
+            )
+            if converted is None:
                 continue
+            name, rel_offsets = converted
             bed_file.write(f"{name}\t{rel_offsets[0]}\t{rel_offsets[1]}\t{p}\n")
 
 
