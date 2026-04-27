@@ -78,6 +78,9 @@ def get_mum_ranges_flanks(index, coords):
     - Uses `index.coord_to_bin(coord)` for bin math (kept in index machinery).
     - Widens outward only: left edge searches left, right edge searches right.
     - Only returns ranges for the left snapped bin and right snapped bin (no middle bins).
+    - Uses stored per-bin spans to optionally slide one bin outward if the snapped
+      non-empty bin cannot left/right-bound the query start/end.
+    - Returns None on any failure (same outcome as no usable flanks); callers print one message.
     """
     idx = index
     s, e = coords
@@ -85,14 +88,30 @@ def get_mum_ranges_flanks(index, coords):
     bin_end = idx.coord_to_bin(e)
     
     if bin_start > idx.max_bin or bin_end > idx.max_bin:
-        return np.empty((0, 2), dtype=np.uint64), (None, None), (bin_start, bin_end), idx
+        return None
 
     # widen outward only: left edge searches left, right edge searches right
     left_bin = idx.closest_nonzero_bin_left(bin_start)
     right_bin = idx.closest_nonzero_bin_right(bin_end)
     if left_bin is None or right_bin is None:
         # case where there's no non-empty bin to the left and/or right
-        return np.empty((0, 2), dtype=np.uint64), (None, None), (bin_start, bin_end), idx
+        return None
+
+    # Now check if the bins have bounding mums for the query coords
+    # if they do not, slide left (or right) until you find a non-empty bin (generally just the next one)
+    if not idx.contains_left_bound(left_bin, s):
+        if left_bin <= 0:
+            return None
+        left_bin = idx.closest_nonzero_bin_left(left_bin - 1)
+        if left_bin is None or not idx.contains_left_bound(left_bin, s):
+            return None
+
+    if not idx.contains_right_bound(right_bin, e):
+        if right_bin >= idx.max_bin:
+            return None
+        right_bin = idx.closest_nonzero_bin_right(right_bin + 1)
+        if right_bin is None or not idx.contains_right_bound(right_bin, e):
+            return None
 
     left_bin = int(left_bin)
     right_bin = int(right_bin)
@@ -254,8 +273,8 @@ def main(args=None):
         args.sequences = list(range(NUM_SEQS))
     coords = sutils.convert_local_to_global_coords(args.range, contig_names[args.seq_idx], seq_lengths_multi[args.seq_idx])
     idx = sutils.parse_index(args.bi, seq_idx=args.seq_idx)
-    ranges = sutils.get_mum_ranges_flanks(idx, coords)
-    if ranges.shape[0] == 0:
+    ranges = get_mum_ranges_flanks(idx, coords)
+    if ranges is None:
         print(
             f"No bounding MUMs found for region {args.range}.",
             file=sys.stderr,

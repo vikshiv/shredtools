@@ -21,6 +21,49 @@ _HEADER_MAGIC = b"bumblbi"
 _HEADER_SIZE = 4
 _CHECKSUM_SAMPLE_SIZE = 1000
 
+# Empty-bin genomic span sentinels (per-bin MIN/MAX in index files)
+_BIN_SPAN_EMPTY_MIN = np.uint64(np.iinfo(np.uint64).max)
+_BIN_SPAN_EMPTY_MAX = np.uint64(0)
+
+
+def _bin_span_for_row_interval(mums, seq_idx: int, lo: int, hi: int):
+    """Genomic [min_start, max_end) on column seq_idx for half-open rows [lo, hi)."""
+    if lo >= hi:
+        return _BIN_SPAN_EMPTY_MIN, _BIN_SPAN_EMPTY_MAX
+    col = mums.starts[lo:hi, seq_idx].astype(np.int64, copy=False)
+    ends = col + mums.lengths[lo:hi].astype(np.int64, copy=False)
+    span_min = np.uint64(col[0])
+    span_max = np.uint64(ends.max())
+    return span_min, span_max
+
+
+def _bin_span_for_bin_pairs(mums, seq_idx: int, pairs):
+    """
+    Genomic min start / max end for union of half-open row ranges ``pairs`` list of (s, e).
+
+    Each range is contiguous rows with non-decreasing starts on seq_idx; min per range
+    is O(1) from the first row; max end is one numpy reduction per range.
+    """
+    if not pairs:
+        return _BIN_SPAN_EMPTY_MIN, _BIN_SPAN_EMPTY_MAX
+    starts_col = mums.starts[:, seq_idx]
+    lens = mums.lengths
+    range_mins = []
+    range_maxs = []
+    for s, e in pairs:
+        s, e = int(s), int(e)
+        if s >= e:
+            continue
+        range_mins.append(starts_col[s])
+        range_maxs.append(
+            np.uint64((starts_col[s:e].astype(np.int64, copy=False) + lens[s:e].astype(np.int64, copy=False)).max())
+        )
+    if not range_mins:
+        return _BIN_SPAN_EMPTY_MIN, _BIN_SPAN_EMPTY_MAX
+    span_min = np.uint64(min(int(x) for x in range_mins))
+    span_max = max(range_maxs)
+    return span_min, span_max
+
 
 def _parse_bins_arg(bins):
     if type(bins) == int:
@@ -165,9 +208,14 @@ def build_bumbl_multiindex(mums, bin_width=1_000_000, verbose=False):
     for seq_idx in range(mums.num_seqs):
         doc_offsets[seq_idx] = len(doc_index) * INT_SIZE # store the current offset of doc_index as the start of doc seq_idx
         doc_index.append(num_bins[seq_idx]) # number of bins for doc seq_idx
+        rmap = range_maps[seq_idx]
+        for b in range(len(rmap)):
+            smin, smax = _bin_span_for_bin_pairs(mums, seq_idx, rmap[b])
+            doc_index.append(smin)
+            doc_index.append(smax)
         bin_offsets = []
         flattened_ranges = []
-        for pairs in range_maps[seq_idx]:
+        for pairs in rmap:
             n = len(pairs)
             bin_offsets.append(n * INT_SIZE * 2) # pair of int64s. Offset relative to start of range array
             for pair in pairs:
@@ -187,11 +235,22 @@ def build_bumbl_multiindex(mums, bin_width=1_000_000, verbose=False):
     
 def build_bumbl_singleindex(mums, seq_idx, bin_width = 1_000_000):
     """Compute bumbl index given a set of MUMs as a MUMdata object."""
-    edges = np.arange(0, mums.starts[-1, seq_idx] + bin_width, bin_width)   
-    offsets = np.searchsorted(mums.starts[:, seq_idx], edges, side="left")[:-1].astype(np.uint64)
-    # write header word, checksum, bin width, num_seqs, seq_idx, then offset array
+    edges = np.arange(0, mums.starts[-1, seq_idx] + bin_width, bin_width)
+    offsets = np.searchsorted(
+        mums.starts[:, seq_idx], edges, side="left"
+    ).astype(np.uint64)
+    num_bins = int(offsets.size) - 1
+    span_flat = []
+    for b in range(num_bins):
+        lo, hi = int(offsets[b]), int(offsets[b + 1])
+        smin, smax = _bin_span_for_row_interval(mums, seq_idx, lo, hi)
+        span_flat.extend((smin, smax))
     checksum = bumbl_lengths_checksum(mums.lengths)
-    return np.insert(offsets, 0, [_build_header_word(0), checksum, bin_width, mums.num_seqs, np.uint64(seq_idx)])
+    header = np.array(
+        [_build_header_word(0), checksum, bin_width, mums.num_seqs, np.uint64(seq_idx)],
+        dtype=np.uint64,
+    )
+    return np.concatenate([header, offsets, np.array(span_flat, dtype=np.uint64)])
 
 def write_bumbl_index(path, index):
     """Write bumbl index to file"""
@@ -212,6 +271,7 @@ class BumblMultiIndex:
     num_seqs: np.uint64
     bin_num: np.uint64
     max_bin: int  # largest valid bin index: int(bin_num) - 1
+    bin_spans: np.ndarray  # uint64, shape (bin_num, 2): [min_start, max_end] per bin
     boundaries: np.ndarray  # uint64, shape (bin_num+1,), byte offsets into ranges section
     ranges: np.ndarray  # uint64, shape (k,2), (mum_start, mum_end) pairs
 
@@ -231,14 +291,43 @@ class BumblMultiIndex:
         i1 = off1 // 16
         return self.ranges[i0:i1]
 
+    def bin_is_empty(self, b: int) -> bool:
+        """True if bin ``b`` has no indexed row ranges (zero byte span in ranges section)."""
+        n = int(self.bin_num)
+        bb = int(b)
+        if not (0 <= bb < n):
+            raise AssertionError("invalid bin")
+        return int(self.boundaries[bb]) == int(self.boundaries[bb + 1])
+
+    def contains_left_bound(self, b: int, pos: int) -> bool:
+        """
+        Whether bin ``b`` can bound a query *start* at ``pos`` using stored spans.
+
+        True iff the bin is non-empty and ``pos >= span_min`` (min MUM start in the bin).
+        ``pos > span_max`` is still True (all MUMs lie left of ``pos``).
+        """
+        if self.bin_is_empty(b):
+            return False
+        return int(pos) >= int(self.bin_spans[int(b), 0])
+
+    def contains_right_bound(self, b: int, pos: int) -> bool:
+        """
+        Whether bin ``b`` can bound a query *end* at ``pos`` using stored spans.
+
+        True iff the bin is non-empty and ``pos <= span_max`` (max MUM end in the bin).
+        ``pos < span_min`` is still True (all MUMs lie right of ``pos``).
+        """
+        if self.bin_is_empty(b):
+            return False
+        return int(pos) <= int(self.bin_spans[int(b), 1])
+
     def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
         n = int(self.bin_num)
         b = int(bin_idx)
         if not (0 <= b < n):
             raise AssertionError("invalid bin")
-        boundaries = self.boundaries
         for i in range(b, -1, -1):
-            if boundaries[i] != boundaries[i + 1]:
+            if not self.bin_is_empty(i):
                 return i
         return None
 
@@ -247,9 +336,8 @@ class BumblMultiIndex:
         b = int(bin_idx)
         if not (0 <= b < n):
             raise AssertionError("invalid bin")
-        boundaries = self.boundaries
         for i in range(b, n):
-            if boundaries[i] != boundaries[i + 1]:
+            if not self.bin_is_empty(i):
                 return i
         return None
 
@@ -266,6 +354,7 @@ class BumblSingleIndex:
     num_seqs: np.uint64
     seq_idx: np.uint64
     offsets: np.ndarray  # uint64, shape (bin_num+1,)
+    bin_spans: np.ndarray  # uint64, shape (bin_num, 2): [min_start, max_end] per bin
     max_bin: int  # largest valid bin index: offsets.size - 2
 
     def get_bins(self, bins):
@@ -278,6 +367,37 @@ class BumblSingleIndex:
         ends = offsets[bin_start + 1 : bin_end + 2]
         return np.stack((starts, ends), axis=1)
 
+    def bin_is_empty(self, b: int) -> bool:
+        """True if bin ``b`` has no MUM rows (half-open row interval is empty)."""
+        offsets = self.offsets
+        n = int(offsets.size - 1)
+        bb = int(b)
+        if not (0 <= bb < n):
+            raise AssertionError("invalid bin")
+        return int(offsets[bb]) == int(offsets[bb + 1])
+
+    def contains_left_bound(self, b: int, pos: int) -> bool:
+        """
+        Whether bin ``b`` can bound a query *start* at ``pos`` using stored spans.
+
+        True iff the bin is non-empty and ``pos >= span_min``.
+        ``pos > span_max`` is still True (all MUMs lie left of ``pos``).
+        """
+        if self.bin_is_empty(b):
+            return False
+        return int(pos) >= int(self.bin_spans[int(b), 0])
+
+    def contains_right_bound(self, b: int, pos: int) -> bool:
+        """
+        Whether bin ``b`` can bound a query *end* at ``pos`` using stored spans.
+
+        True iff the bin is non-empty and ``pos <= span_max``.
+        ``pos < span_min`` is still True (all MUMs lie right of ``pos``).
+        """
+        if self.bin_is_empty(b):
+            return False
+        return int(pos) <= int(self.bin_spans[int(b), 1])
+
     def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
         offsets = self.offsets
         n = int(offsets.size - 1)
@@ -285,7 +405,7 @@ class BumblSingleIndex:
         if not (0 <= b < n):
             raise AssertionError("invalid bin")
         for i in range(b, -1, -1):
-            if offsets[i] != offsets[i + 1]:
+            if not self.bin_is_empty(i):
                 return i
         return None
 
@@ -296,14 +416,13 @@ class BumblSingleIndex:
         if not (0 <= b < n):
             raise AssertionError("invalid bin")
         for i in range(b, n):
-            if offsets[i] != offsets[i + 1]:
+            if not self.bin_is_empty(i):
                 return i
         return None
 
     def coord_to_bin(self, coord) -> int:
         bw = int(self.bin_width)
         return int(coord) // bw
-
 
 
 def _url_size(url):
@@ -404,13 +523,21 @@ def _parse_multi_index_reader(reader: _RandomAccessReader, seq_idx):
         raise AssertionError("corrupt index (doc too small)")
 
     bin_num = np.uint64(_U64.unpack_from(doc_raw, 0)[0])
-    boundaries_bytes = (int(bin_num) + 1) * 8
-    header_bytes = 8 + boundaries_bytes
+    bn = int(bin_num)
+    span_bytes = bn * 16
+    boundaries_bytes = (bn + 1) * 8
+    header_bytes = 8 + span_bytes + boundaries_bytes
     if len(doc_raw) < header_bytes:
         raise AssertionError("corrupt index (doc truncated)")
 
+    if bn == 0:
+        bin_spans = np.empty((0, 2), dtype=np.uint64)
+    else:
+        bin_spans = np.frombuffer(
+            doc_raw, dtype=np.uint64, count=2 * bn, offset=8
+        ).reshape(bn, 2, order="C")
     boundaries = np.frombuffer(
-        doc_raw, dtype=np.uint64, count=int(bin_num) + 1, offset=8
+        doc_raw, dtype=np.uint64, count=bn + 1, offset=8 + span_bytes
     )
     ranges_raw = memoryview(doc_raw)[header_bytes:]
     if (len(ranges_raw) % 16) != 0:
@@ -429,6 +556,7 @@ def _parse_multi_index_reader(reader: _RandomAccessReader, seq_idx):
         num_seqs=np.uint64(num_seqs),
         bin_num=bin_num,
         max_bin=int(bin_num) - 1,
+        bin_spans=bin_spans.copy(),
         boundaries=boundaries,
         ranges=ranges,
     )
@@ -446,16 +574,28 @@ def _parse_single_index_reader(reader: _RandomAccessReader, seq_idx):
 
     offsets_off = 8 * 5
     tail = reader.read_at(offsets_off, reader.size() - offsets_off)
-    offsets = np.frombuffer(tail, dtype=np.uint64).copy()
-    if offsets.size < 2:
-        raise AssertionError("index is empty.")
+    tail_len = len(tail)
+    if tail_len % 8 != 0:
+        raise AssertionError("corrupt index (tail not multiple of 8)")
+    n_u64 = tail_len // 8
+    if n_u64 < 1 or (n_u64 - 1) % 3 != 0:
+        raise AssertionError("corrupt index (single-index tail length)")
+    bin_num = (n_u64 - 1) // 3
+    offsets = np.frombuffer(tail, dtype=np.uint64, count=bin_num + 1, offset=0).copy()
+    if bin_num == 0:
+        bin_spans = np.empty((0, 2), dtype=np.uint64)
+    else:
+        bin_spans = np.frombuffer(
+            tail, dtype=np.uint64, count=2 * bin_num, offset=8 * (bin_num + 1)
+        ).reshape(bin_num, 2, order="C").copy()
 
     return BumblSingleIndex(
         bin_width=np.uint64(bin_width),
         num_seqs=np.uint64(num_seqs),
         seq_idx=np.uint64(stored_seq_idx),
         offsets=offsets,
-        max_bin=int(offsets.size) - 2,
+        bin_spans=bin_spans,
+        max_bin=bin_num - 1,
     )
 
 
@@ -487,7 +627,7 @@ def parse_index(src, seq_idx=None):
             fin.close()
 
 # Version of BUMBL range helpers below (bump when layout, dtypes, or HTTP behavior changes).
-_BUMBL_RANGE_HELPERS_VERSION = 1
+_BUMBL_RANGE_HELPERS_VERSION = 2
 
 
 def parse_bumbl_range(mumfile, mum_ranges):

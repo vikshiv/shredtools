@@ -92,13 +92,25 @@ HEADER
 └────────────────────────────────────────────────────────────────────────┘
 DATA
 ┌────────────────────────────────────────────────────────────────────────┐
-│  OFFSET[0] … OFFSET[NUM_BINS]       First MUM row index per bin        │
+│  OFFSET[0] … OFFSET[NUM_BINS]       First MUM row index per bin edge   │
+│                                     (`NUM_BINS + 1` values; see below) │
+│  BIN_SPAN[0] … BIN_SPAN[NUM_BINS-1]  Per bin: MIN_b (uint64), MAX_b    │
+│                                     (uint64), interleaved — 16 B each  │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **BIN_WIDTH**: size of each genomic bin (smaller **BIN_WIDTH** ⇒ larger index).
 - **NUM_BINS**: `len(OFFSET) - 1` (not stored explicitly).
-- **OFFSET[i]**: **MUM row index** (0-based) of the **first** MUM whose start in the indexed column (`SEQ_IDX`) is **≥ `i × BIN_WIDTH`**.
+- **OFFSET[i]**: **MUM row index** (0-based) of the **first** MUM whose start in the indexed column (`SEQ_IDX`) is **≥ `i × BIN_WIDTH`**, for `i < NUM_BINS`. **OFFSET[NUM_BINS]** is the row count sentinel (first index past the last bin), i.e. total MUM rows or `searchsorted` for the last bin boundary.
+
+### Per-bin genomic span (`BIN_SPAN`)
+
+For each bin `b` in `0 … NUM_BINS-1`, let `lo = OFFSET[b]`, `hi = OFFSET[b+1]` (half-open row interval on `SEQ_IDX`).
+
+- **MIN_b**: minimum `starts[row, SEQ_IDX]` over rows `row ∈ [lo, hi)` (empty bin: sentinel **`2^64−1`** / `UINT64_MAX`).
+- **MAX_b**: maximum `starts[row, SEQ_IDX] + lengths[row]` over the same rows (empty bin: sentinel **`0`**).
+
+On disk, spans are stored **interleaved**: `MIN_0, MAX_0, MIN_1, MAX_1, …` immediately after the `OFFSET` table (`2 × NUM_BINS` uint64 words).
 
 To query an interval `[s, e)` on the indexed sequence coordinate system:
 
@@ -137,8 +149,8 @@ PER-SEQUENCE HEADER
 └────────────────────────────────────────────────────────────────────────┘
 PER-SEQUENCE DATA
 ┌────────────────────────────────────────────────────────────────────────┐
-│  BOUNDARY[0] … BOUNDARY[BIN_NUM]   (BIN_NUM + 1) × uint64              │
-│  range_set_base = doc_start + 8 × (BIN_NUM + 2)                        │
+│  BIN_SPAN[0] … BIN_SPAN[BIN_NUM-1]   Per bin: MIN_b, MAX_b (uint64 each)│
+│  BOUNDARY[0] … BOUNDARY[BIN_NUM]     (BIN_NUM + 1) × uint64             │
 └────────────────────────────────────────────────────────────────────────┘
 SET OF RANGES (per bin; byte offsets relative to range_set_base)
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -147,7 +159,22 @@ SET OF RANGES (per bin; byte offsets relative to range_set_base)
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-For bin index `b`: `off0 = BOUNDARY[b]`, `off1 = BOUNDARY[b + 1]` (seek to `doc_start + 8 × (1 + b)`, read two `uint64`s). The byte range `[range_set_base + off0, range_set_base + off1)` is **one bin’s** set of ranges (a contiguous run of `(mum_start, mum_end)` pairs); concatenate across bins for the full query.
+**`range_set_base`**: byte offset from `doc_start` to the first byte of the packed `(MUM_START, MUM_END)` region:
+
+`range_set_base = doc_start + 8 × (1 + 2 × BIN_NUM + (BIN_NUM + 1))` = `doc_start + 8 × (3 × BIN_NUM + 2)`.
+
+### Per-bin genomic span (multi-index)
+
+For bin `b`, the index lists one or more half-open row ranges `(s, e)` on `.bumbl` rows (each range contiguous and non-decreasing in `starts[:, seq_idx]` at build time).
+
+- **MIN_b**: minimum of `starts[s, seq_idx]` over every listed range (equivalently: min of each range’s first-row start).
+- **MAX_b**: maximum of `starts[row, seq_idx] + lengths[row]` over all rows in all listed ranges for that bin.
+
+**Empty bin** (no pairs; `BOUNDARY[b] == BOUNDARY[b+1]`): same sentinels as single-index — **MIN = `UINT64_MAX`**, **MAX = `0`**.
+
+For bin index `b`: `off0 = BOUNDARY[b]`, `off1 = BOUNDARY[b + 1]`. The byte range `[range_set_base + off0, range_set_base + off1)` is **one bin’s** set of ranges (a contiguous run of `(mum_start, mum_end)` pairs); concatenate across bins for the full query.
+
+To read **BOUNDARY** entries from disk: they begin at byte offset `doc_start + 8 × (1 + 2 × BIN_NUM)` (after `BIN_NUM` and the interleaved `BIN_SPAN` block).
 
 ### Query steps
 
