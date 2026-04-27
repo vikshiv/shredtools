@@ -71,6 +71,40 @@ def find_target_region(coll_mums, coords, seq_idx, sequences):
     other_coords = [(starts[mum_bounds[0], i] + left_offset, starts[mum_bounds[1], i] + right_offset) for i in sequences]
     return mum_bounds, other_coords
 
+def get_mum_ranges_flanks(index, coords):
+    """
+    Return only the *flanking* bin ranges for `coords` on `seq_idx`.
+
+    - Uses `index.coord_to_bin(coord)` for bin math (kept in index machinery).
+    - Widens outward only: left edge searches left, right edge searches right.
+    - Only returns ranges for the left snapped bin and right snapped bin (no middle bins).
+    """
+    idx = index
+    s, e = coords
+    bin_start = idx.coord_to_bin(s)
+    bin_end = idx.coord_to_bin(e)
+    
+    if bin_start > idx.max_bin or bin_end > idx.max_bin:
+        return np.empty((0, 2), dtype=np.uint64), (None, None), (bin_start, bin_end), idx
+
+    # widen outward only: left edge searches left, right edge searches right
+    left_bin = idx.closest_nonzero_bin_left(bin_start)
+    right_bin = idx.closest_nonzero_bin_right(bin_end)
+    if left_bin is None or right_bin is None:
+        # case where there's no non-empty bin to the left and/or right
+        return np.empty((0, 2), dtype=np.uint64), (None, None), (bin_start, bin_end), idx
+
+    left_bin = int(left_bin)
+    right_bin = int(right_bin)
+
+    left_ranges = idx.get_bins(left_bin)
+    if right_bin == left_bin:
+        ranges = left_ranges
+    else:
+        right_ranges = idx.get_bins(right_bin)
+        ranges = np.concatenate([left_ranges, right_ranges], axis=0)
+
+    return ranges
 
 def safe_convert_global_to_local_coords(
     global_start,
