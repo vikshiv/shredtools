@@ -220,10 +220,10 @@ def main(args=None):
         args.sequences = list(range(NUM_SEQS))
     coords = sutils.convert_local_to_global_coords(args.range, contig_names[args.seq_idx], seq_lengths_multi[args.seq_idx])
     idx = sutils.parse_index(args.bi, seq_idx=args.seq_idx)
-    ranges, snapped_bins, requested_bins = sutils.get_mum_ranges_flanks(idx, coords)
+    ranges = sutils.get_mum_ranges_flanks(idx, coords)
     if ranges.shape[0] == 0:
         print(
-            f"No MUM ranges found for bins {requested_bins} (snapped to {snapped_bins}).",
+            f"No bounding MUMs found for region {args.range}.",
             file=sys.stderr,
         )
         raise SystemExit(1)

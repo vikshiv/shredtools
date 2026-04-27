@@ -211,6 +211,7 @@ class BumblMultiIndex:
     bin_width: np.uint64
     num_seqs: np.uint64
     bin_num: np.uint64
+    max_bin: int  # largest valid bin index: int(bin_num) - 1
     boundaries: np.ndarray  # uint64, shape (bin_num+1,), byte offsets into ranges section
     ranges: np.ndarray  # uint64, shape (k,2), (mum_start, mum_end) pairs
 
@@ -254,9 +255,7 @@ class BumblMultiIndex:
 
     def coord_to_bin(self, coord) -> int:
         bw = int(self.bin_width)
-        max_bin = int(self.bin_num) - 1
-        b = int(coord) // bw
-        return max(0, min(b, max_bin))
+        return int(coord) // bw
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +266,7 @@ class BumblSingleIndex:
     num_seqs: np.uint64
     seq_idx: np.uint64
     offsets: np.ndarray  # uint64, shape (bin_num+1,)
+    max_bin: int  # largest valid bin index: offsets.size - 2
 
     def get_bins(self, bins):
         bin_start, bin_end = _parse_bins_arg(bins)
@@ -302,9 +302,7 @@ class BumblSingleIndex:
 
     def coord_to_bin(self, coord) -> int:
         bw = int(self.bin_width)
-        max_bin = int(self.offsets.size - 2)
-        b = int(coord) // bw
-        return max(0, min(b, max_bin))
+        return int(coord) // bw
 
 
 
@@ -430,6 +428,7 @@ def _parse_multi_index_reader(reader: _RandomAccessReader, seq_idx):
         bin_width=np.uint64(bin_width),
         num_seqs=np.uint64(num_seqs),
         bin_num=bin_num,
+        max_bin=int(bin_num) - 1,
         boundaries=boundaries,
         ranges=ranges,
     )
@@ -456,6 +455,7 @@ def _parse_single_index_reader(reader: _RandomAccessReader, seq_idx):
         num_seqs=np.uint64(num_seqs),
         seq_idx=np.uint64(stored_seq_idx),
         offsets=offsets,
+        max_bin=int(offsets.size) - 2,
     )
 
 
@@ -589,7 +589,9 @@ def convert_local_to_global_coords(coords, names, lengths):
     contig = coords[0]
     start, end = int(coords[1].split("-")[0]), int(coords[1].split("-")[1])
     assert contig in names, f"sequence {contig} not found in indicated FASTA file"
-    offset = sum(lengths[: names.index(contig)])
+    contig_idx = names.index(contig)
+    assert start <= end < lengths[contig_idx], f'Region {start}-{end} is invalid for contig {contig} with length {lengths[contig_idx]}'
+    offset = sum(lengths[: contig_idx])
     return offset + start, offset + end
 
 
@@ -613,11 +615,15 @@ def get_mum_ranges_flanks(index, coords):
     s, e = coords
     bin_start = idx.coord_to_bin(s)
     bin_end = idx.coord_to_bin(e)
+    
+    if bin_start > idx.max_bin or bin_end > idx.max_bin:
+        return np.empty((0, 2), dtype=np.uint64), (None, None), (bin_start, bin_end), idx
 
     # widen outward only: left edge searches left, right edge searches right
     left_bin = idx.closest_nonzero_bin_left(bin_start)
     right_bin = idx.closest_nonzero_bin_right(bin_end)
     if left_bin is None or right_bin is None:
+        # case where there's no non-empty bin to the left and/or right
         return np.empty((0, 2), dtype=np.uint64), (None, None), (bin_start, bin_end), idx
 
     left_bin = int(left_bin)
@@ -630,4 +636,4 @@ def get_mum_ranges_flanks(index, coords):
         right_ranges = idx.get_bins(right_bin)
         ranges = np.concatenate([left_ranges, right_ranges], axis=0)
 
-    return ranges, (left_bin, right_bin), (bin_start, bin_end)
+    return ranges
