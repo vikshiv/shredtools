@@ -8,7 +8,7 @@ import mumemto.viz_mums
 from matplotlib import pyplot as plt
 from matplotlib.collections import PolyCollection
 from tqdm.auto import tqdm
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 
 from shredtools import utils as sutils
 
@@ -55,8 +55,8 @@ def parse_arguments(args=None):
 
 def find_target_region(coll_mums, coords, seq_idx, sequences):
     starts = coll_mums.starts
-    left_mum_idx = bisect_left(starts[:, seq_idx], coords[0]) - 1
-    right_mum_idx = bisect_left(starts[:, seq_idx] + coll_mums.lengths, coords[1])
+    left_mum_idx = bisect_right(starts[:, seq_idx], coords[0]) - 1
+    right_mum_idx = bisect_right(starts[:, seq_idx] + coll_mums.lengths, coords[1])
     mum_bounds = (left_mum_idx, right_mum_idx)
     left_mum, right_mum = coll_mums[mum_bounds[0]], coll_mums[mum_bounds[1]]
     left_bound = left_mum.starts[seq_idx]
