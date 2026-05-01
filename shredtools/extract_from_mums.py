@@ -282,6 +282,8 @@ def main(args=None):
         raise SystemExit(1)
 
     mums = sutils.parse_bumbl_range(args.mum_file, ranges)
+    mums.sort(args.seq_idx)
+    
 
     mum_bounds, other_coords = find_target_region(mums, coords, args.seq_idx, args.sequences)
     if args.plot:

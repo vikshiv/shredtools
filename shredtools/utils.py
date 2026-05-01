@@ -112,8 +112,7 @@ def checksum_from_bumbl(bumbl_path):
         sample_n = min(_CHECKSUM_SAMPLE_SIZE, n_mums)
         lengths32 = np.fromfile(fin, dtype=np.uint32, count=sample_n)
     return n_seqs, bumbl_lengths_checksum(lengths32.astype(np.uint64, copy=False))
-
-
+    
 def verify_bumbl_sorted_column(bumbl_path, seq_idx, chunk_rows=65536):
     """
     Stream-check that ``starts[:, seq_idx]`` is non-decreasing (sorted for interval queries).
