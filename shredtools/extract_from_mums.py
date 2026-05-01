@@ -55,19 +55,30 @@ def parse_arguments(args=None):
 
 def find_target_region(coll_mums, coords, seq_idx, sequences):
     starts = coll_mums.starts
+    ### bisect_right is correct for both edge cases of landing on the MUM boundary
     left_mum_idx = bisect_right(starts[:, seq_idx], coords[0]) - 1
     right_mum_idx = bisect_right(starts[:, seq_idx] + coll_mums.lengths, coords[1])
     mum_bounds = (left_mum_idx, right_mum_idx)
     left_mum, right_mum = coll_mums[mum_bounds[0]], coll_mums[mum_bounds[1]]
-    left_bound = left_mum.starts[seq_idx]
+    ### sanity check
+    assert (coords[0] >= left_mum.starts[seq_idx]) and (coords[1] < right_mum.starts[seq_idx] + right_mum.length)
+    ### outer edges of bounding region (both exclusive)
+    left_bound = left_mum.starts[seq_idx] + left_mum.length - 1
     right_bound = right_mum.starts[seq_idx]
     left_offset, right_offset = 0, 0
+    left_margin, right_margin = None, None
     if coords[0] < left_mum.starts[seq_idx] + left_mum.length:
         left_offset = coords[0] - left_mum.starts[seq_idx]
+        left_margin = 0
+    else:
+        left_margin = coords[0] - left_bound
     if coords[1] > right_mum.starts[seq_idx]:
         right_offset = coords[1] - right_mum.starts[seq_idx]
-    print("left margin:", coords[0] - left_bound - left_offset, file=sys.stderr)
-    print("right margin:", right_bound + right_offset - coords[1], file=sys.stderr)
+        right_margin = 0
+    else:
+        right_margin = right_bound - coords[1]
+    print(f"left margin: {left_margin}", file=sys.stderr)
+    print(f"right margin: {right_margin}", file=sys.stderr)
     other_coords = [(starts[mum_bounds[0], i] + left_offset, starts[mum_bounds[1], i] + right_offset) for i in sequences]
     return mum_bounds, other_coords
 
@@ -284,7 +295,6 @@ def main(args=None):
     mums = sutils.parse_bumbl_range(args.mum_file, ranges)
     mums.sort(args.seq_idx)
     
-
     mum_bounds, other_coords = find_target_region(mums, coords, args.seq_idx, args.sequences)
     if args.plot:
         if not args.lens:

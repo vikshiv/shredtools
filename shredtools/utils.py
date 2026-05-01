@@ -711,12 +711,13 @@ def convert_local_to_global_coords(coords, names, lengths):
     """Convert contig-local `contig:start-end` to global offsets."""
     coords = coords.split(":")
     contig = coords[0]
-    start, end = int(coords[1].split("-")[0]), int(coords[1].split("-")[1])
+    start = int(coords[1].split("-")[0])
+    end_excl = int(coords[1].split("-")[1])
     assert contig in names, f"sequence {contig} not found in indicated FASTA file"
     contig_idx = names.index(contig)
-    assert start <= end < lengths[contig_idx], f'Region {start}-{end} is invalid for contig {contig} with length {lengths[contig_idx]}'
+    assert 0 <= start < end_excl <= lengths[contig_idx], (f"Region {start}-{end_excl} is invalid for contig {contig} with length {lengths[contig_idx]}")
     offset = sum(lengths[: contig_idx])
-    return offset + start, offset + end
+    return offset + start, offset + (end_excl - 1)
 
 
 def convert_global_to_local_coords(start, end, names, lengths):
