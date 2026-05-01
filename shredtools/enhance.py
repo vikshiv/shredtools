@@ -227,7 +227,6 @@ def enhance_gap(gap_seqs):
         input_seqs.append([s])
 
     out_mums = run_mumemto(input_seqs, min_match_len=10)
-
     num_mums = len(out_mums)
     num_seqs_total = len(gap_seqs)
     lengths = np.empty(num_mums, dtype=np.uint32)
@@ -240,8 +239,13 @@ def enhance_gap(gap_seqs):
         lengths[j] = length
         starts[j, present_idx] = offsets + present_offsets
         strands[j, present_idx] = match_strands
-
-    return mutils.MUMdata.from_arrays(lengths, starts, strands)
+        
+    mums = mutils.MUMdata.from_arrays(lengths, starts, strands)
+    mums.sort()
+    strict_mums = mums[:, present_idx]
+    blocks = mutils.find_coll_blocks(strict_mums)
+    coll_mums = [i for s, e in blocks for i in range(s, e+1)]   
+    return mums[coll_mums, :]
 
 def main(args=None):
     args = parse_arguments(args)
@@ -274,6 +278,7 @@ def main(args=None):
     slices_by_seq = filter_gap_slices(coords, gap_ids, outlier_mask, seq_lengths)
 
     gap_seqs = collect_gap_sequences_from_fastas(seq_paths, slices_by_seq, gap_ids, args.threads)
+
     print(f"loaded gap sequences for {len(gap_seqs)} gaps", file=sys.stderr)
 
     threads = min(int(args.threads), max(1, len(gap_ids)))
