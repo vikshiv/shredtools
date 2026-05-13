@@ -262,11 +262,11 @@ def plot_full_synteny(args, coords, mums, mum_bounds, other_coords, seq_idx, seq
         mums.lengths.copy(), 
         mums.starts[:, sequences].copy(), 
         mums.strands[:, sequences].copy(),
-        blocks = mums.blocks.copy()
     )
     # plot_mums.starts -= offsets[:,0]
     start, end = np.array(coords)# - offsets[seq_idx,0]
     centering= [0] * len(sequences)
+    plot_mums.blocks = mutils.find_coll_blocks(plot_mums, max_break=100)
     poly, colors = mumemto.viz_mums.get_block_polygons(plot_mums.blocks, plot_mums, centering, inv_color='green')
     fig, ax = plot(np.array(seq_lengths)[sequences], poly, colors, centering, size=(10,5))
     ax.plot([start, start], [seq_idx - 0.5, seq_idx + 0.5], color='red', linestyle='--', linewidth=1)
