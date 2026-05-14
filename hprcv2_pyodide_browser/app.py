@@ -18,66 +18,74 @@ All indexes are hosted thanks to the AWS Open Data Sponsorship Program and are f
 """
 _S3_MUMEMTO = "https://genome-idx.s3.amazonaws.com/mumemto"
 
-# Each preset: .bumbl, .bumbl.bi, and .lengths on S3 (same bucket path pattern).
+# Each preset: .bumbl and .bumbl.bi on S3. Contig/length metadata lives in ``pangenome_lengths.json``
+# (built with ``lengths_to_json.py``) and is loaded at startup via ``load_lengths_bundle_path``.
 # Order preserved for dropdown: enhanced default, then HPRCr2 merged, then HPRCr1.
 PANGENOMES: dict[str, dict[str, str]] = {
     "hprcv2_enhanced": {
         "label": "HPRCr2 (enhanced)",
         "bumbl": f"{_S3_MUMEMTO}/hprcv2_enhanced_merged.bumbl",
         "bi": f"{_S3_MUMEMTO}/hprcv2_enhanced_merged.bumbl.bi",
-        "lengths": f"{_S3_MUMEMTO}/hprcv2_enhanced_merged.lengths",
     },
     "hprcv2_merged": {
         "label": "HPRCr2",
         "bumbl": f"{_S3_MUMEMTO}/hprcv2_merged.bumbl",
         "bi": f"{_S3_MUMEMTO}/hprcv2_merged.bumbl.bi",
-        "lengths": f"{_S3_MUMEMTO}/hprcv2_merged.lengths",
     },
     "hprcv1": {
         "label": "HPRCr1",
         "bumbl": f"{_S3_MUMEMTO}/hprcv1.bumbl",
         "bi": f"{_S3_MUMEMTO}/hprcv1.bumbl.bi",
-        "lengths": f"{_S3_MUMEMTO}/hprcv1.lengths",
     },
 }
 
 ACTIVE_PANGENOME = "hprcv2_enhanced"
 
-# Caches (modest memory): lengths by MEMFS path; index by "pangenome_key:seq_idx".
-_LENGTHS_META: dict = {}
+# Loaded once from ``pangenome_lengths.json`` (keys match ``PANGENOMES``).
+_LENGTHS_BUNDLE: dict | None = None
+# Index cache: "pangenome_key:seq_idx" → parsed multi-index document.
 _INDEX_BY_SEQ: dict = {}
 
 
-def lengths_memfs_path(pangenome_key: str | None = None) -> str:
-    """MEMFS path where the browser should write the `.lengths` bytes for a preset."""
-    k = ACTIVE_PANGENOME if pangenome_key is None else pangenome_key
-    if k not in PANGENOMES:
-        raise ValueError(f"Unknown pangenome {k!r}")
-    return f"/data.{k}.lengths"
+def load_lengths_bundle_path(path: str) -> None:
+    """
+    Load merged lengths JSON into memory. Call from the browser after writing the file to MEMFS.
 
-
-def current_lengths_path() -> str:
-    return lengths_memfs_path(ACTIVE_PANGENOME)
+    Each top-level value must include ``seq_lengths_multi`` and ``contig_names`` (see ``lengths_to_json.py``).
+    """
+    global _LENGTHS_BUNDLE
+    with open(path, "r", encoding="utf-8") as f:
+        bundle = json.load(f)
+    for k in PANGENOMES:
+        if k not in bundle:
+            raise ValueError(f"Lengths bundle missing preset key {k!r}")
+        ent = bundle[k]
+        sm = ent.get("seq_lengths_multi")
+        cn = ent.get("contig_names")
+        if not isinstance(sm, list) or not isinstance(cn, list):
+            raise ValueError(f"Invalid lengths entry for {k!r}")
+        if len(sm) != len(cn):
+            raise ValueError(f"seq_lengths_multi / contig_names length mismatch for {k!r}")
+    _LENGTHS_BUNDLE = bundle
 
 
 def pangenome_options_json() -> str:
-    """Dropdown options: key, UI label, lengths URL (fetch from browser before set_active)."""
+    """Dropdown options: key and UI label."""
     order = ["hprcv2_enhanced", "hprcv2_merged", "hprcv1"]
     out = []
     for k in order:
         if k in PANGENOMES:
             p = PANGENOMES[k]
-            out.append({"key": k, "label": p["label"], "lengths_url": p["lengths"]})
+            out.append({"key": k, "label": p["label"]})
     return json.dumps(out)
 
 
 def set_active_pangenome(key: str) -> None:
-    """Switch active S3 trio; clears lengths + index caches (call after new lengths file is written)."""
+    """Switch active S3 bumbl/bi pair; clears index cache only (lengths stay in the loaded bundle)."""
     global ACTIVE_PANGENOME
     if key not in PANGENOMES:
         raise ValueError(f"Unknown pangenome {key!r}")
     ACTIVE_PANGENOME = key
-    _LENGTHS_META.clear()
     _INDEX_BY_SEQ.clear()
 
 
@@ -89,15 +97,14 @@ def _active_bumbl() -> str:
     return PANGENOMES[ACTIVE_PANGENOME]["bumbl"]
 
 
-def _get_lengths_meta(lengths_path: str):
-    meta = _LENGTHS_META.get(lengths_path)
-    if meta is not None:
-        return meta
-    seq_lengths_multi = sutils.get_sequence_lengths(lengths_path, multilengths=True)
-    contig_names = sutils.get_contig_names(lengths_path)
-    meta = (seq_lengths_multi, contig_names, len(seq_lengths_multi))
-    _LENGTHS_META[lengths_path] = meta
-    return meta
+def _get_lengths_meta():
+    if _LENGTHS_BUNDLE is None:
+        raise RuntimeError("Lengths bundle not loaded; call load_lengths_bundle_path first.")
+    ent = _LENGTHS_BUNDLE[ACTIVE_PANGENOME]
+    seq_lengths_multi = ent["seq_lengths_multi"]
+    contig_names = ent["contig_names"]
+    n = len(seq_lengths_multi)
+    return seq_lengths_multi, contig_names, n
 
 
 def _index_cache_key(seq_idx: int) -> str:
@@ -273,9 +280,9 @@ def format_bed(
     return "".join(lines)
 
 
-def describe_ui(lengths_path: str) -> str:
-    """JSON for genome / contig dropdowns. Call after writing lengths to MEMFS."""
-    seq_lengths_multi, contig_names, n = _get_lengths_meta(lengths_path)
+def describe_ui() -> str:
+    """JSON for genome / contig dropdowns (uses the loaded lengths bundle for ``ACTIVE_PANGENOME``)."""
+    seq_lengths_multi, contig_names, n = _get_lengths_meta()
     genomes = []
     for i in range(n):
         cnames = contig_names[i]
@@ -291,7 +298,6 @@ def describe_ui(lengths_path: str) -> str:
 
 
 async def run(
-    lengths_path: str,
     seq_idx: int,
     range_str: str,
     sequences=None,
@@ -300,7 +306,7 @@ async def run(
     Returns BED text or raises with a clear error message.
     `range_str` is chr:start-end (same as -r in index_extract).
     """
-    seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta(lengths_path)
+    seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta()
     if not (0 <= seq_idx < num_seqs):
         raise ValueError(f"seq_idx {seq_idx} invalid (N = {num_seqs})")
     if sequences is not None and any(s >= num_seqs for s in sequences):
@@ -325,7 +331,6 @@ async def run(
 
 
 async def run_with_bounds(
-    lengths_path: str,
     seq_idx: int,
     range_str: str,
     sequences=None,
@@ -334,7 +339,7 @@ async def run_with_bounds(
     Like `run`, but returns JSON: { bed: str, bounds: { contig, start, end } }.
     Bounds are the extracted interval for the selected genome (seq_idx), in contig-local coords.
     """
-    seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta(lengths_path)
+    seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta()
     if not (0 <= seq_idx < num_seqs):
         raise ValueError(f"seq_idx {seq_idx} invalid (N = {num_seqs})")
     # For the browser app we always compute all sequences; UI-side filtering is handled in JS.

@@ -13,44 +13,76 @@ import os
 import struct
 import sys
 from typing import Protocol
-import urllib.error
-import urllib.request
 
 
-def get_sequence_lengths(lengths_file, multilengths=False):
-    # Copied from https://github.com/vikshiv/mumemto/blob/main/mumemto/utils.py
-    def get_lengths(lengths_file):
-        return [int(l.split()[1]) for l in open(lengths_file, "r").read().splitlines()]
+def _nonempty_lines(text: str):
+    for ln in text.splitlines():
+        s = ln.strip()
+        if s:
+            yield s
 
-    def get_multilengths(lengths_file):
+
+def get_sequence_lengths_from_text(text: str, multilengths=False, *, label="<lengths>"):
+    """Parse simple or multilengths format from in-memory text (same rules as mumemto file parsers)."""
+    lines = list(_nonempty_lines(text))
+    if not lines:
+        raise ValueError(f"Empty lengths: {label}")
+
+    def get_lengths_simple():
+        return [int(l.split()[1]) for l in lines]
+
+    def get_multilengths_parsed():
         offset = []
         cur_offset = []
-        for l in open(lengths_file, "r").readlines():
-            l = l.strip().split()
-            if l[1] == "*":
+        for l in lines:
+            parts = l.split()
+            if parts[1] == "*":
                 if cur_offset:
                     offset.append(cur_offset)
                 cur_offset = []
                 continue
-            cur_offset.append(int(l[2]))
+            cur_offset.append(int(parts[2]))
         offset.append(cur_offset)
         return offset
 
-    simple = True
-    try:
-        with open(lengths_file, "r") as f:
-            first_line = f.readline().strip().split()
-            if len(first_line) > 1 and first_line[1] == "*":
-                simple = False
-    except FileNotFoundError:
-        raise FileNotFoundError(f"File {lengths_file} not found.")
+    first = lines[0].split()
+    simple = not (len(first) > 1 and first[1] == "*")
     if simple and multilengths:
-        raise ValueError("Multi-FASTA lengths not available in ", lengths_file)
+        raise ValueError("Multi-FASTA lengths not available in ", label)
     if not simple:
-        offsets = get_multilengths(lengths_file)
+        offsets = get_multilengths_parsed()
         return offsets if multilengths else [sum(o) for o in offsets]
-    else:
-        return get_lengths(lengths_file)
+    return get_lengths_simple()
+
+
+def get_contig_names_from_text(text: str, *, label="<lengths>"):
+    """Multilengths contig names from in-memory text."""
+    names = []
+    cur_name = []
+    first_line = True
+    for raw in _nonempty_lines(text):
+        parts = raw.split()
+        if first_line and parts[1] != "*":
+            raise ValueError("Lengths file must be formatted as multilengths.")
+        first_line = False
+        if parts[1] == "*":
+            if cur_name:
+                names.append(cur_name)
+            cur_name = []
+            continue
+        cur_name.append(parts[1])
+    names.append(cur_name)
+    return names
+
+
+def get_sequence_lengths(lengths_file, multilengths=False):
+    # Copied from https://github.com/vikshiv/mumemto/blob/main/mumemto/utils.py
+    try:
+        with open(lengths_file, "r", encoding="utf-8", errors="replace") as f:
+            body = f.read()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"File {lengths_file} not found.") from None
+    return get_sequence_lengths_from_text(body, multilengths=multilengths, label=lengths_file)
 
 
 def get_contig_names(lengths_file):
@@ -66,22 +98,9 @@ def get_contig_names(lengths_file):
     Returns:
         List of lists where names[i] is the list of contig names for sequence i
     """
-    names = []
-    cur_name = []
-    first_line = True
-    for l in open(lengths_file, "r").readlines():
-        l = l.strip().split()
-        if first_line and l[1] != "*":
-            raise ValueError("Lengths file must be formatted as multilengths.")
-        first_line = False
-        if l[1] == "*":
-            if cur_name:
-                names.append(cur_name)
-            cur_name = []
-            continue
-        cur_name.append(l[1])
-    names.append(cur_name)
-    return names
+    with open(lengths_file, "r", encoding="utf-8", errors="replace") as f:
+        body = f.read()
+    return get_contig_names_from_text(body, label=lengths_file)
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,6 +539,9 @@ def sort_mums_by_seq_column(mums: MUMdata, seq_idx: int) -> MUMdata:
             new_starts.append(mums.starts[base + k])
             new_strands.append(mums.strands[base + k])
     return MUMdata(ns, new_lengths, new_starts, new_strands)
+
+
+def find_chr(starts, lengths):
     # Pure Python replacement for the previous numpy-based implementation.
     offsets = []
     s = 0
@@ -533,14 +555,22 @@ def sort_mums_by_seq_column(mums: MUMdata, seq_idx: int) -> MUMdata:
 
 
 def convert_local_to_global_coords(coords, names, lengths):
-    """Convert contig-local `contig:start-end` to global offsets."""
+    """Convert contig-local ``contig:start-end_excl`` to global inclusive endpoints (matches ``shredtools.utils``)."""
     coords = coords.split(":")
     contig = coords[0]
-    start, end = int(coords[1].split("-")[0]), int(coords[1].split("-")[1])
+    start = int(coords[1].split("-")[0])
+    end_excl = int(coords[1].split("-")[1])
     if contig not in names:
         raise ValueError(f"sequence {contig} not found in indicated FASTA file")
-    offset = sum(lengths[: names.index(contig)])
-    return offset + start, offset + end
+    contig_idx = names.index(contig)
+    L = int(lengths[contig_idx])
+    if not (0 <= start < end_excl <= L):
+        raise ValueError(
+            f"Region {start}-{end_excl} is invalid for contig {contig} with length {L} "
+            "(expected half-open interval [start, end_excl) in contig coordinates)"
+        )
+    offset = sum(int(x) for x in lengths[:contig_idx])
+    return offset + start, offset + (end_excl - 1)
 
 
 def convert_global_to_local_coords(start, end, names, lengths):
