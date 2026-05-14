@@ -28,6 +28,17 @@
     #substatus { color: #666; font-size: 0.85rem; min-height: 1.1em; }
     #out { width: 100%; box-sizing: border-box; min-height: 12rem; }
     code { background: #f0f0f0; padding: 0.1em 0.3em; }
+    .intro-md { font-size: 0.9rem; color: #333; }
+    .intro-md p { margin: 0.35rem 0; }
+    .intro-md p:first-child { margin-top: 0; }
+    .intro-md p:last-child { margin-bottom: 0; }
+    .intro-md ul, .intro-md ol { margin: 0.35rem 0 0.35rem 1.25rem; padding: 0; }
+    .intro-md li { margin: 0.15rem 0; }
+    .intro-md h2 { font-size: 1.05rem; margin: 0.5rem 0 0.25rem; }
+    .intro-md h3 { font-size: 1rem; margin: 0.45rem 0 0.2rem; }
+    .intro-how-details { margin: 0.5rem 0 0.75rem; }
+    .intro-how-details summary { font-weight: 600; }
+    .intro-how-body { margin-top: 0.5rem; }
     details { font-size: 0.9rem; margin: 0.75rem 0; padding: 0.5rem 0.75rem; background: #f7f7f7; border-radius: 4px; }
     details summary { cursor: pointer; color: #222; }
     details p { margin: 0.5rem 0 0; }
@@ -35,33 +46,14 @@
 </head>
 <body>
   <img class="logo" src="shredtools_logo.png" alt="Shredtools logo" />
-  <h1>HPRCv2 Shredtools extract</h1>
-  <p class="hint">
-    <strong>BUMBL:</strong> <code>https://genome-idx.s3.amazonaws.com/mumemto/hprcv2_enhanced_merged.bumbl</code><br />
-    <strong>Index:</strong> <code>https://genome-idx.s3.amazonaws.com/mumemto/hprcv2_enhanced_merged_single.bumbl.bi</code>
-  </p>
-  <p class="hint">
-    <strong>Local use:</strong> this folder must be served over HTTP (not opened as a raw file) so the browser can load
-    <code>app.py</code> and <code>bumbl_index_utils.py</code>:
-    <code>cd hprcv2_pyodide_browser &amp;&amp; python3 -m http.server 8000</code> then open <code>http://127.0.0.1:8000/</code>
-  </p>
-  <details>
-    <summary>Host on a remote server, use from your laptop</summary>
-    <p>
-      Pyodide runs in <strong>your browser</strong>; the server only serves static files (like notebook HTML).
-      Copy this whole <code>hprcv2_pyodide_browser</code> directory to the host, then on the host run:
-    </p>
-    <p><code>cd hprcv2_pyodide_browser &amp;&amp; python3 -m http.server 8000 --bind 0.0.0.0</code></p>
-    <p>
-      <strong>Option A — SSH port forward (recommended):</strong> on the host bind to loopback only:
-      <code>python3 -m http.server 8000 --bind 127.0.0.1</code> then on your laptop:
-      <code>ssh -N -L 8000:127.0.0.1:8000 you@remote</code> and open <code>http://127.0.0.1:8000/</code> in a local browser.
-    </p>
-    <p>
-      <strong>Option B — direct URL:</strong> if your network allows, open <code>http://&lt;remote-ip&gt;:8000/</code> (and open
-      firewall / security group for that port). Prefer HTTPS and auth in front of the static files if the page is exposed.
-    </p>
-  </details>
+  <h1>Shredtools extract</h1>
+  <div id="appIntroWrap" style="display: none;">
+    <div id="appIntroRest" class="hint intro-md" hidden></div>
+    <details id="appIntroDetails" class="intro-how-details">
+      <summary>How does it work?</summary>
+      <div id="appIntroFirst" class="hint intro-md intro-how-body"></div>
+    </details>
+  </div>
   <div class="clear"></div>
 
   <p class="hint" id="lengthsHint">Loading bundled lengths…</p>
@@ -164,6 +156,7 @@
     </table>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js"></script>
   <script type="module">
     const $ = (id) => document.getElementById(id);
@@ -173,6 +166,61 @@
       $("substatus").textContent = sub;
     };
     const secs = (tStart = t0) => ((performance.now() - tStart) / 1000).toFixed(1) + "s";
+
+    function renderIntroMarkdown(md, wrap) {
+      const restEl = $("appIntroRest");
+      const firstEl = $("appIntroFirst");
+      const detailsEl = $("appIntroDetails");
+      const s = String(md || "").trim();
+      if (!s) {
+        wrap.style.display = "none";
+        restEl.innerHTML = "";
+        firstEl.innerHTML = "";
+        restEl.hidden = true;
+        detailsEl.hidden = true;
+        return;
+      }
+      let first;
+      let rest;
+      const m = /\n\s*\n/.exec(s);
+      if (!m) {
+        first = s;
+        rest = "";
+      } else {
+        first = s.slice(0, m.index).trim();
+        rest = s.slice(m.index).replace(/^\s*\n+/, "").trim();
+      }
+
+      const parse =
+        typeof marked !== "undefined" && typeof marked.parse === "function"
+          ? marked.parse.bind(marked)
+          : null;
+
+      function setHtml(el, src) {
+        if (!src) {
+          el.innerHTML = "";
+          return;
+        }
+        if (parse) {
+          const out = parse(src, { breaks: true });
+          if (out instanceof Promise) {
+            void out.then((html) => {
+              el.innerHTML = html;
+            });
+          } else {
+            el.innerHTML = out;
+          }
+        } else {
+          el.textContent = src;
+        }
+      }
+
+      wrap.style.display = "";
+      restEl.hidden = !rest;
+      setHtml(restEl, rest);
+      detailsEl.hidden = !first;
+      setHtml(firstEl, first);
+    }
 
     function prettyGenome(label) {
       // Standard: GENOME#HAP_NUM#CONTIG -> GENOME_hapHAP_NUM
@@ -288,6 +336,10 @@ if "/" not in sys.path:
     sys.path.insert(0, "/")
     `);
     await pyodide.runPythonAsync("import app");
+    const intro = String(
+      await pyodide.runPythonAsync("import app as _a; getattr(_a, 'INTRO', '') or ''")
+    ).trim();
+    renderIntroMarkdown(intro, $("appIntroWrap"));
     status("Ready.", `elapsed ${secs()}`);
 
     let manifest = null;

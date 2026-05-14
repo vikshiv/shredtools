@@ -179,6 +179,9 @@ class BumblMultiIndex:
     bin_width: int
     num_seqs: int
     bin_num: int
+    max_bin: int  # largest valid bin index: bin_num - 1
+    span_min: array  # 'Q', length bin_num — per-bin min start on this seq (UINT64_MAX if empty)
+    span_max: array  # 'Q', length bin_num — per-bin max end on this seq (0 if empty)
     boundaries: array  # 'Q' byte offsets
     range_set_base: int  # absolute byte offset of the ranges section start
 
@@ -211,14 +214,28 @@ class BumblMultiIndex:
             out.append((int(u64s[i]), int(u64s[i + 1])))
         return out
 
+    def bin_is_empty(self, b: int) -> bool:
+        b = int(b)
+        boundaries = self.boundaries
+        return boundaries[b] == boundaries[b + 1]
+
+    def contains_left_bound(self, b: int, pos: int) -> bool:
+        if self.bin_is_empty(b):
+            return False
+        return int(pos) >= int(self.span_min[b])
+
+    def contains_right_bound(self, b: int, pos: int) -> bool:
+        if self.bin_is_empty(b):
+            return False
+        return int(pos) <= int(self.span_max[b])
+
     def closest_nonzero_bin_left(self, bin_idx: int):
         n = int(self.bin_num)
         b = int(bin_idx)
         if not (0 <= b < n):
             raise AssertionError("invalid bin")
-        boundaries = self.boundaries
         for i in range(b, -1, -1):
-            if boundaries[i] != boundaries[i + 1]:
+            if not self.bin_is_empty(i):
                 return i
         return None
 
@@ -227,17 +244,13 @@ class BumblMultiIndex:
         b = int(bin_idx)
         if not (0 <= b < n):
             raise AssertionError("invalid bin")
-        boundaries = self.boundaries
         for i in range(b, n):
-            if boundaries[i] != boundaries[i + 1]:
+            if not self.bin_is_empty(i):
                 return i
         return None
 
     def coord_to_bin(self, coord) -> int:
-        bw = int(self.bin_width)
-        max_bin = int(self.bin_num) - 1
-        b = int(coord) // bw
-        return max(0, min(b, max_bin))
+        return int(coord) // int(self.bin_width)
 
 
 def _url_size(url):
@@ -339,17 +352,28 @@ async def _parse_multi_index_reader(reader: _AsyncRandomAccessReader, seq_idx):
     if not (doc_start < doc_end):
         raise AssertionError("corrupt index (doc offsets)")
 
-    # Read only doc header + boundaries; do not fetch the full ranges table.
+    # Per-sequence doc: BIN_NUM, BIN_SPAN (2×BIN_NUM uint64s), BOUNDARY (BIN_NUM+1).
     doc_head = await reader.read_at(doc_start, 8)
     if len(doc_head) != 8:
         raise AssertionError("corrupt index (doc too small)")
     bin_num = int(_U64.unpack_from(doc_head, 0)[0])
+    span_bytes = bin_num * 16
     boundaries_bytes = (bin_num + 1) * 8
-    boundaries_raw = await reader.read_at(doc_start + 8, boundaries_bytes)
-    if len(boundaries_raw) != boundaries_bytes:
+    rest = await reader.read_at(doc_start + 8, span_bytes + boundaries_bytes)
+    if len(rest) != span_bytes + boundaries_bytes:
         raise AssertionError("corrupt index (doc truncated)")
-    boundaries = _array_from_bytes("Q", boundaries_raw)
-    range_set_base = doc_start + 8 + boundaries_bytes
+
+    span_min = array("Q")
+    span_max = array("Q")
+    for b in range(bin_num):
+        lo = b * 16
+        span_min.append(int(_U64.unpack_from(rest, lo)[0]))
+        span_max.append(int(_U64.unpack_from(rest, lo + 8)[0]))
+
+    boundaries = _array_from_bytes("Q", rest[span_bytes:])
+    header_bytes = 8 + span_bytes + boundaries_bytes
+    range_set_base = doc_start + header_bytes
+    max_bin = int(bin_num) - 1 if bin_num else -1
 
     return BumblMultiIndex(
         src=getattr(reader, "_url", ""),  # best-effort; replaced in parse_index wrapper
@@ -357,6 +381,9 @@ async def _parse_multi_index_reader(reader: _AsyncRandomAccessReader, seq_idx):
         bin_width=int(bin_width),
         num_seqs=int(num_seqs),
         bin_num=int(bin_num),
+        max_bin=int(max_bin),
+        span_min=span_min,
+        span_max=span_max,
         boundaries=boundaries,
         range_set_base=int(range_set_base),
     )
@@ -391,6 +418,9 @@ async def parse_index(src, seq_idx=None):
             bin_width=idx.bin_width,
             num_seqs=idx.num_seqs,
             bin_num=idx.bin_num,
+            max_bin=idx.max_bin,
+            span_min=idx.span_min,
+            span_max=idx.span_max,
             boundaries=idx.boundaries,
             range_set_base=idx.range_set_base,
         )
@@ -458,7 +488,7 @@ async def parse_bumbl_range(mumfile, mum_ranges):
             byte0 = bit0 // 8
             byte1 = (bit0 + n_bits + 7) // 8
             packed = await r.read_at(strands_pos + byte0, byte1 - byte0)
-# numpy's unpackbits default is MSB-first; replicate that mapping.
+            # numpy.unpackbits default is MSB-first; replicate that mapping.
             off = bit0 % 8
             base_bit = off
             for k in range(n_bits):
@@ -472,7 +502,24 @@ async def parse_bumbl_range(mumfile, mum_ranges):
     return MUMdata(int(n_seqs), lengths_out, starts_out, strands_out)
 
 
-def find_chr(starts, lengths):
+def sort_mums_by_seq_column(mums: MUMdata, seq_idx: int) -> MUMdata:
+    """Sort MUM rows by start on ``seq_idx`` (matches ``mums.sort(seq_idx)`` in mumemto)."""
+    n = mums.num_mums
+    if n <= 1:
+        return mums
+    ns = mums.n_seqs
+    j = int(seq_idx)
+    order = sorted(range(n), key=lambda i: mums.start(i, j))
+    new_lengths = array("I")
+    new_starts = array("q")
+    new_strands = bytearray()
+    for i in order:
+        new_lengths.append(mums.lengths[i])
+        base = i * ns
+        for k in range(ns):
+            new_starts.append(mums.starts[base + k])
+            new_strands.append(mums.strands[base + k])
+    return MUMdata(ns, new_lengths, new_starts, new_strands)
     # Pure Python replacement for the previous numpy-based implementation.
     offsets = []
     s = 0
@@ -508,15 +555,40 @@ def convert_global_to_local_coords(start, end, names, lengths):
 
 
 async def get_mum_ranges_flanks(index, coords):
+    """
+    Flanking-bin MUM row ranges for ``coords`` (same logic as ``extract_from_mums.get_mum_ranges_flanks``).
+
+    Returns ``None`` if no usable flanking bins, else
+    ``(ranges, (left_bin, right_bin), (bin_start, bin_end))`` where ``ranges`` is a list of
+    ``(mum_start, mum_end)`` half-open row intervals.
+    """
     idx = index
-    s, e = coords
+    s, e = int(coords[0]), int(coords[1])
     bin_start = idx.coord_to_bin(s)
     bin_end = idx.coord_to_bin(e)
+    max_bin = int(idx.max_bin)
+
+    if bin_start > max_bin or bin_end > max_bin:
+        return None
 
     left_bin = idx.closest_nonzero_bin_left(bin_start)
     right_bin = idx.closest_nonzero_bin_right(bin_end)
     if left_bin is None or right_bin is None:
-        return [], (None, None), (bin_start, bin_end)
+        return None
+
+    if not idx.contains_left_bound(left_bin, s):
+        if left_bin <= 0:
+            return None
+        left_bin = idx.closest_nonzero_bin_left(left_bin - 1)
+        if left_bin is None or not idx.contains_left_bound(left_bin, s):
+            return None
+
+    if not idx.contains_right_bound(right_bin, e):
+        if right_bin >= max_bin:
+            return None
+        right_bin = idx.closest_nonzero_bin_right(right_bin + 1)
+        if right_bin is None or not idx.contains_right_bound(right_bin, e):
+            return None
 
     left_bin = int(left_bin)
     right_bin = int(right_bin)
