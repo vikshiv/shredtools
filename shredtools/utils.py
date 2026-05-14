@@ -21,6 +21,48 @@ _HEADER_MAGIC = b"bumblbi"
 _HEADER_SIZE = 4
 _CHECKSUM_SAMPLE_SIZE = 1000
 
+# Empty-bin genomic span sentinels (per-bin MIN/MAX in index files)
+_BIN_SPAN_EMPTY_MIN = np.uint64(np.iinfo(np.uint64).max)
+_BIN_SPAN_EMPTY_MAX = np.uint64(0)
+
+
+def _bin_span_for_row_interval(mums, seq_idx: int, lo: int, hi: int):
+    """Genomic [min_start, max_end) on column seq_idx for half-open rows [lo, hi)."""
+    if lo >= hi:
+        return _BIN_SPAN_EMPTY_MIN, _BIN_SPAN_EMPTY_MAX
+    col = mums.starts[lo:hi, seq_idx].astype(np.int64, copy=False)
+    ends = col + mums.lengths[lo:hi].astype(np.int64, copy=False)
+    span_min = np.uint64(col[0])
+    span_max = np.uint64(ends.max())
+    return span_min, span_max
+
+
+def _bin_span_for_bin_pairs(mums, seq_idx: int, pairs):
+    """
+    Genomic min start / max end for union of half-open row ranges ``pairs`` list of (s, e).
+
+    Each range is contiguous rows with non-decreasing starts on seq_idx; min per range
+    is O(1) from the first row; max end is one numpy reduction per range.
+    """
+    if not pairs:
+        return _BIN_SPAN_EMPTY_MIN, _BIN_SPAN_EMPTY_MAX
+    starts_col = mums.starts[:, seq_idx]
+    lens = mums.lengths
+    range_mins = []
+    range_maxs = []
+    for s, e in pairs:
+        if s >= e:
+            continue
+        range_mins.append(starts_col[s])
+        range_maxs.append(
+            np.uint64((starts_col[s:e].astype(np.int64, copy=False) + lens[s:e].astype(np.int64, copy=False)).max())
+        )
+    if not range_mins:
+        return _BIN_SPAN_EMPTY_MIN, _BIN_SPAN_EMPTY_MAX
+    span_min = np.uint64(min(x for x in range_mins))
+    span_max = max(range_maxs)
+    return span_min, span_max
+
 
 def _parse_bins_arg(bins):
     if type(bins) == int:
@@ -67,11 +109,10 @@ def checksum_from_bumbl(bumbl_path):
         fin.read(2)  # flags
         n_seqs = _U64.unpack(fin.read(8))[0]
         n_mums = _U64.unpack(fin.read(8))[0]
-        sample_n = min(_CHECKSUM_SAMPLE_SIZE, int(n_mums))
+        sample_n = min(_CHECKSUM_SAMPLE_SIZE, n_mums)
         lengths32 = np.fromfile(fin, dtype=np.uint32, count=sample_n)
     return n_seqs, bumbl_lengths_checksum(lengths32.astype(np.uint64, copy=False))
-
-
+    
 def verify_bumbl_sorted_column(bumbl_path, seq_idx, chunk_rows=65536):
     """
     Stream-check that ``starts[:, seq_idx]`` is non-decreasing (sorted for interval queries).
@@ -83,9 +124,9 @@ def verify_bumbl_sorted_column(bumbl_path, seq_idx, chunk_rows=65536):
     prev = None
     for _lengths, starts_col, _strands_col in utils.parse_bumbl_generator(
         bumbl_path,
-        seq_idx=int(seq_idx),
+        seq_idx=seq_idx,
         verbose=False,
-        chunksize=int(chunk_rows),
+        chunksize=chunk_rows,
         return_chunk=True,
         return_blocks=False,
     ):
@@ -95,7 +136,7 @@ def verify_bumbl_sorted_column(bumbl_path, seq_idx, chunk_rows=65536):
             return False
         if np.any(np.diff(starts_col) < 0):
             return False
-        prev = int(starts_col[-1])
+        prev = starts_col[-1]
     return True
 
 
@@ -165,9 +206,14 @@ def build_bumbl_multiindex(mums, bin_width=1_000_000, verbose=False):
     for seq_idx in range(mums.num_seqs):
         doc_offsets[seq_idx] = len(doc_index) * INT_SIZE # store the current offset of doc_index as the start of doc seq_idx
         doc_index.append(num_bins[seq_idx]) # number of bins for doc seq_idx
+        rmap = range_maps[seq_idx]
+        for b in range(len(rmap)):
+            smin, smax = _bin_span_for_bin_pairs(mums, seq_idx, rmap[b])
+            doc_index.append(smin)
+            doc_index.append(smax)
         bin_offsets = []
         flattened_ranges = []
-        for pairs in range_maps[seq_idx]:
+        for pairs in rmap:
             n = len(pairs)
             bin_offsets.append(n * INT_SIZE * 2) # pair of int64s. Offset relative to start of range array
             for pair in pairs:
@@ -187,11 +233,22 @@ def build_bumbl_multiindex(mums, bin_width=1_000_000, verbose=False):
     
 def build_bumbl_singleindex(mums, seq_idx, bin_width = 1_000_000):
     """Compute bumbl index given a set of MUMs as a MUMdata object."""
-    edges = np.arange(0, mums.starts[-1, seq_idx] + bin_width, bin_width)   
-    offsets = np.searchsorted(mums.starts[:, seq_idx], edges, side="left")[:-1].astype(np.uint64)
-    # write header word, checksum, bin width, num_seqs, seq_idx, then offset array
+    edges = np.arange(0, mums.starts[-1, seq_idx] + bin_width, bin_width)
+    offsets = np.searchsorted(
+        mums.starts[:, seq_idx], edges, side="left"
+    ).astype(np.uint64)
+    num_bins = offsets.size - 1
+    span_flat = []
+    for b in range(num_bins):
+        lo, hi = int(offsets[b]), int(offsets[b + 1])
+        smin, smax = _bin_span_for_row_interval(mums, seq_idx, lo, hi)
+        span_flat.extend((smin, smax))
     checksum = bumbl_lengths_checksum(mums.lengths)
-    return np.insert(offsets, 0, [_build_header_word(0), checksum, bin_width, mums.num_seqs, np.uint64(seq_idx)])
+    header = np.array(
+        [_build_header_word(0), checksum, bin_width, mums.num_seqs, np.uint64(seq_idx)],
+        dtype=np.uint64,
+    )
+    return np.concatenate([header, offsets, np.array(span_flat, dtype=np.uint64)])
 
 def write_bumbl_index(path, index):
     """Write bumbl index to file"""
@@ -211,17 +268,19 @@ class BumblMultiIndex:
     bin_width: np.uint64
     num_seqs: np.uint64
     bin_num: np.uint64
+    max_bin: int  # largest valid bin index: int(bin_num) - 1
+    bin_spans: np.ndarray  # uint64, shape (bin_num, 2): [min_start, max_end] per bin
     boundaries: np.ndarray  # uint64, shape (bin_num+1,), byte offsets into ranges section
     ranges: np.ndarray  # uint64, shape (k,2), (mum_start, mum_end) pairs
 
     def get_bins(self, bins):
         bin_start, bin_end = _parse_bins_arg(bins)
-        bin_num = int(self.bin_num)
+        bin_num = self.bin_num
         if not (0 <= bin_start <= bin_end < bin_num):
             raise AssertionError("invalid bin")
 
-        off0 = int(self.boundaries[bin_start])
-        off1 = int(self.boundaries[bin_end + 1])
+        off0 = self.boundaries[bin_start]
+        off1 = self.boundaries[bin_end + 1]
         if off1 < off0:
             raise AssertionError("corrupt index (bin offsets)")
         if (off0 % 16) != 0 or (off1 % 16) != 0:
@@ -230,33 +289,53 @@ class BumblMultiIndex:
         i1 = off1 // 16
         return self.ranges[i0:i1]
 
-    def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
-        n = int(self.bin_num)
-        b = int(bin_idx)
+    def bin_is_empty(self, b: int) -> bool:
+        """True if bin ``b`` has no indexed row ranges (zero byte span in ranges section)."""
+        n = self.bin_num
         if not (0 <= b < n):
             raise AssertionError("invalid bin")
-        boundaries = self.boundaries
-        for i in range(b, -1, -1):
-            if boundaries[i] != boundaries[i + 1]:
+        return self.boundaries[b] == self.boundaries[b + 1]
+
+    def contains_left_bound(self, b: int, pos: int) -> bool:
+        """
+        Whether bin ``b`` can bound a query *start* at ``pos`` using stored spans.
+
+        True iff the bin is non-empty and ``pos >= span_min`` (min MUM start in the bin).
+        ``pos > span_max`` is still True (all MUMs lie left of ``pos``).
+        """
+        if self.bin_is_empty(b):
+            return False
+        return pos >= self.bin_spans[b, 0]
+
+    def contains_right_bound(self, b: int, pos: int) -> bool:
+        """
+        Whether bin ``b`` can bound a query *end* at ``pos`` using stored spans.
+
+        True iff the bin is non-empty and ``pos <= span_max`` (max MUM end in the bin).
+        ``pos < span_min`` is still True (all MUMs lie right of ``pos``).
+        """
+        if self.bin_is_empty(b):
+            return False
+        return pos <= self.bin_spans[b, 1]
+
+    def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
+        if not (0 <= bin_idx < self.bin_num):
+            raise AssertionError("invalid bin")
+        for i in range(bin_idx, -1, -1):
+            if not self.bin_is_empty(i):
                 return i
         return None
 
     def closest_nonzero_bin_right(self, bin_idx: int) -> int | None:
-        n = int(self.bin_num)
-        b = int(bin_idx)
-        if not (0 <= b < n):
+        if not (0 <= bin_idx < self.bin_num):
             raise AssertionError("invalid bin")
-        boundaries = self.boundaries
-        for i in range(b, n):
-            if boundaries[i] != boundaries[i + 1]:
+        for i in range(bin_idx, self.bin_num):
+            if not self.bin_is_empty(i):
                 return i
         return None
 
     def coord_to_bin(self, coord) -> int:
-        bw = int(self.bin_width)
-        max_bin = int(self.bin_num) - 1
-        b = int(coord) // bw
-        return max(0, min(b, max_bin))
+        return coord // self.bin_width
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,45 +346,71 @@ class BumblSingleIndex:
     num_seqs: np.uint64
     seq_idx: np.uint64
     offsets: np.ndarray  # uint64, shape (bin_num+1,)
+    bin_spans: np.ndarray  # uint64, shape (bin_num, 2): [min_start, max_end] per bin
+    max_bin: int  # largest valid bin index: offsets.size - 2
 
     def get_bins(self, bins):
         bin_start, bin_end = _parse_bins_arg(bins)
         offsets = self.offsets
-        bin_num = int(offsets.size - 1)
+        bin_num = offsets.size - 1
         if not (0 <= bin_start <= bin_end < bin_num):
             raise AssertionError("invalid bin range.")
         starts = offsets[bin_start : bin_end + 1]
         ends = offsets[bin_start + 1 : bin_end + 2]
         return np.stack((starts, ends), axis=1)
 
-    def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
+    def bin_is_empty(self, b: int) -> bool:
+        """True if bin ``b`` has no MUM rows (half-open row interval is empty)."""
         offsets = self.offsets
-        n = int(offsets.size - 1)
-        b = int(bin_idx)
+        n = offsets.size - 1
         if not (0 <= b < n):
             raise AssertionError("invalid bin")
-        for i in range(b, -1, -1):
-            if offsets[i] != offsets[i + 1]:
+        return offsets[b] == offsets[b + 1]
+
+    def contains_left_bound(self, b: int, pos: int) -> bool:
+        """
+        Whether bin ``b`` can bound a query *start* at ``pos`` using stored spans.
+
+        True iff the bin is non-empty and ``pos >= span_min``.
+        ``pos > span_max`` is still True (all MUMs lie left of ``pos``).
+        """
+        if self.bin_is_empty(b):
+            return False
+        return pos >= self.bin_spans[b, 0]
+
+    def contains_right_bound(self, b: int, pos: int) -> bool:
+        """
+        Whether bin ``b`` can bound a query *end* at ``pos`` using stored spans.
+
+        True iff the bin is non-empty and ``pos <= span_max``.
+        ``pos < span_min`` is still True (all MUMs lie right of ``pos``).
+        """
+        if self.bin_is_empty(b):
+            return False
+        return pos <= self.bin_spans[b, 1]
+
+    def closest_nonzero_bin_left(self, bin_idx: int) -> int | None:
+        offsets = self.offsets
+        n = offsets.size - 1
+        if not (0 <= bin_idx < n):
+            raise AssertionError("invalid bin")
+        for i in range(bin_idx, -1, -1):
+            if not self.bin_is_empty(i):
                 return i
         return None
 
     def closest_nonzero_bin_right(self, bin_idx: int) -> int | None:
         offsets = self.offsets
-        n = int(offsets.size - 1)
-        b = int(bin_idx)
-        if not (0 <= b < n):
+        n = offsets.size - 1
+        if not (0 <= bin_idx < n):
             raise AssertionError("invalid bin")
-        for i in range(b, n):
-            if offsets[i] != offsets[i + 1]:
+        for i in range(bin_idx, n):
+            if not self.bin_is_empty(i):
                 return i
         return None
 
     def coord_to_bin(self, coord) -> int:
-        bw = int(self.bin_width)
-        max_bin = int(self.offsets.size - 2)
-        b = int(coord) // bw
-        return max(0, min(b, max_bin))
-
+        return coord // self.bin_width
 
 
 def _url_size(url):
@@ -334,12 +439,12 @@ class _RandomAccessReader(Protocol):
 class _FileReader:
     def __init__(self, fin):
         self._fin = fin
-        self._size = int(os.fstat(fin.fileno()).st_size)
+        self._size = os.fstat(fin.fileno()).st_size
 
     def read_at(self, offset: int, nbytes: int) -> bytes:
-        self._fin.seek(int(offset))
-        data = self._fin.read(int(nbytes))
-        if len(data) != int(nbytes):
+        self._fin.seek(offset)
+        data = self._fin.read(nbytes)
+        if len(data) != nbytes:
             raise AssertionError("short read")
         return data
 
@@ -353,10 +458,8 @@ class _UrlReader:
         self._size = None
 
     def read_at(self, offset: int, nbytes: int) -> bytes:
-        start = int(offset)
-        n = int(nbytes)
         req = urllib.request.Request(
-            self._url, headers={"Range": f"bytes={start}-{start + n - 1}"}
+            self._url, headers={"Range": f"bytes={offset}-{offset + nbytes - 1}"}
         )
         try:
             with urllib.request.urlopen(req) as resp:
@@ -365,14 +468,14 @@ class _UrlReader:
             raise RuntimeError(
                 f"Range request failed ({e.code}). URL may not support byte ranges."
             ) from e
-        if len(data) != n:
-            raise RuntimeError(f"Short read: wanted {n} bytes @ {start}, got {len(data)}")
+        if len(data) != nbytes:
+            raise RuntimeError(f"Short read: wanted {nbytes} bytes @ {offset}, got {len(data)}")
         return data
 
     def size(self) -> int:
         if self._size is None:
             self._size = _url_size(self._url)
-        return int(self._size)
+        return self._size
 
 
 def _open_reader(src):
@@ -387,32 +490,40 @@ def _open_reader(src):
 
 
 def _parse_multi_index_reader(reader: _RandomAccessReader, seq_idx):
+    seq_idx = int(seq_idx)
     header = reader.read_at(0, 8 * _HEADER_SIZE)
     _format = _parse_header_word(np.frombuffer(header[:8], dtype=np.uint64, count=1)[0])
     assert _format == 1, "Invalid FORMAT, multi-index format is type 1."
     bin_width = np.frombuffer(header[16:24], dtype=np.uint64, count=1)[0]
     num_seqs = np.frombuffer(header[24:32], dtype=np.uint64, count=1)[0]
-    if not (0 <= int(seq_idx) < int(num_seqs)):
+    if not (0 <= seq_idx < int(num_seqs)):
         raise AssertionError("invalid seq_idx")
 
-    off = (_HEADER_SIZE * 8) + 8 * int(seq_idx)
+    off = (_HEADER_SIZE * 8) + 8 * seq_idx
     doc_offs = reader.read_at(off, 16)
     doc_start, doc_end = np.frombuffer(doc_offs, dtype=np.uint64, count=2)
-    if not (int(doc_start) < int(doc_end)):
+    if not (doc_start < doc_end):
         raise AssertionError("corrupt index (doc offsets)")
 
-    doc_raw = reader.read_at(int(doc_start), int(doc_end - doc_start))
+    doc_raw = reader.read_at(doc_start, doc_end - doc_start)
     if len(doc_raw) < 8:
         raise AssertionError("corrupt index (doc too small)")
 
     bin_num = np.uint64(_U64.unpack_from(doc_raw, 0)[0])
-    boundaries_bytes = (int(bin_num) + 1) * 8
-    header_bytes = 8 + boundaries_bytes
+    span_bytes = bin_num * 16
+    boundaries_bytes = (bin_num + 1) * 8
+    header_bytes = 8 + span_bytes + boundaries_bytes
     if len(doc_raw) < header_bytes:
         raise AssertionError("corrupt index (doc truncated)")
 
+    if bin_num == 0:
+        bin_spans = np.empty((0, 2), dtype=np.uint64)
+    else:
+        bin_spans = np.frombuffer(
+            doc_raw, dtype=np.uint64, count=2 * bin_num, offset=8
+        ).reshape(bin_num, 2, order="C")
     boundaries = np.frombuffer(
-        doc_raw, dtype=np.uint64, count=int(bin_num) + 1, offset=8
+        doc_raw, dtype=np.uint64, count=bin_num + 1, offset=8 + span_bytes
     )
     ranges_raw = memoryview(doc_raw)[header_bytes:]
     if (len(ranges_raw) % 16) != 0:
@@ -422,14 +533,16 @@ def _parse_multi_index_reader(reader: _RandomAccessReader, seq_idx):
         if len(ranges_raw)
         else np.empty((0, 2), dtype=np.uint64)
     )
-    if boundaries.size and int(boundaries[-1]) != len(ranges_raw):
+    if boundaries.size and boundaries[-1] != len(ranges_raw):
         raise AssertionError("corrupt index (boundary/range size mismatch)")
 
     return BumblMultiIndex(
-        seq_idx=int(seq_idx),
+        seq_idx=seq_idx,
         bin_width=np.uint64(bin_width),
         num_seqs=np.uint64(num_seqs),
         bin_num=bin_num,
+        max_bin=int(bin_num) - 1,
+        bin_spans=bin_spans.copy(),
         boundaries=boundaries,
         ranges=ranges,
     )
@@ -447,15 +560,28 @@ def _parse_single_index_reader(reader: _RandomAccessReader, seq_idx):
 
     offsets_off = 8 * 5
     tail = reader.read_at(offsets_off, reader.size() - offsets_off)
-    offsets = np.frombuffer(tail, dtype=np.uint64).copy()
-    if offsets.size < 2:
-        raise AssertionError("index is empty.")
+    tail_len = len(tail)
+    if tail_len % 8 != 0:
+        raise AssertionError("corrupt index (tail not multiple of 8)")
+    n_u64 = tail_len // 8
+    if n_u64 < 1 or (n_u64 - 1) % 3 != 0:
+        raise AssertionError("corrupt index (single-index tail length)")
+    bin_num = (n_u64 - 1) // 3
+    offsets = np.frombuffer(tail, dtype=np.uint64, count=bin_num + 1, offset=0).copy()
+    if bin_num == 0:
+        bin_spans = np.empty((0, 2), dtype=np.uint64)
+    else:
+        bin_spans = np.frombuffer(
+            tail, dtype=np.uint64, count=2 * bin_num, offset=8 * (bin_num + 1)
+        ).reshape(bin_num, 2, order="C").copy()
 
     return BumblSingleIndex(
         bin_width=np.uint64(bin_width),
         num_seqs=np.uint64(num_seqs),
         seq_idx=np.uint64(stored_seq_idx),
         offsets=offsets,
+        bin_spans=bin_spans,
+        max_bin=bin_num - 1,
     )
 
 
@@ -487,7 +613,7 @@ def parse_index(src, seq_idx=None):
             fin.close()
 
 # Version of BUMBL range helpers below (bump when layout, dtypes, or HTTP behavior changes).
-_BUMBL_RANGE_HELPERS_VERSION = 1
+_BUMBL_RANGE_HELPERS_VERSION = 2
 
 
 def parse_bumbl_range(mumfile, mum_ranges):
@@ -519,16 +645,14 @@ def parse_bumbl_range(mumfile, mum_ranges):
     try:
         header = r.read_at(0, 2 + 8 + 8)
         np.frombuffer(header[:2], dtype=np.uint16, count=1)  # flags (unused)
-        n_seqs = int(np.frombuffer(header[2:10], dtype=np.uint64, count=1)[0])
-        n_mums = int(np.frombuffer(header[10:18], dtype=np.uint64, count=1)[0])
+        n_seqs = np.frombuffer(header[2:10], dtype=np.uint64, count=1)[0]
+        n_mums = np.frombuffer(header[10:18], dtype=np.uint64, count=1)[0]
 
         lengths_pos = 2 + 8 + 8
         offsets_pos = lengths_pos + (n_mums * length_size)
         strands_pos = offsets_pos + (n_mums * n_seqs * start_size)
 
         for mum_start, mum_end in mum_ranges:
-            mum_start = int(mum_start)
-            mum_end = int(mum_end)
             if mum_start < 0:
                 mum_start = n_mums + mum_start
             if mum_end < 0:
@@ -587,10 +711,13 @@ def convert_local_to_global_coords(coords, names, lengths):
     """Convert contig-local `contig:start-end` to global offsets."""
     coords = coords.split(":")
     contig = coords[0]
-    start, end = int(coords[1].split("-")[0]), int(coords[1].split("-")[1])
+    start = int(coords[1].split("-")[0])
+    end_excl = int(coords[1].split("-")[1])
     assert contig in names, f"sequence {contig} not found in indicated FASTA file"
-    offset = sum(lengths[: names.index(contig)])
-    return offset + start, offset + end
+    contig_idx = names.index(contig)
+    assert 0 <= start < end_excl <= lengths[contig_idx], (f"Region {start}-{end_excl} is invalid for contig {contig} with length {lengths[contig_idx]}")
+    offset = sum(lengths[: contig_idx])
+    return offset + start, offset + (end_excl - 1)
 
 
 def convert_global_to_local_coords(start, end, names, lengths):
@@ -599,35 +726,3 @@ def convert_global_to_local_coords(start, end, names, lengths):
         f"start and end coords are in different contigs: {names[contig[0]]} and {names[contig[1]]}"
     )
     return names[contig[0]], rel_offsets
-
-
-def get_mum_ranges_flanks(index, coords):
-    """
-    Return only the *flanking* bin ranges for `coords` on `seq_idx`.
-
-    - Uses `index.coord_to_bin(coord)` for bin math (kept in index machinery).
-    - Widens outward only: left edge searches left, right edge searches right.
-    - Only returns ranges for the left snapped bin and right snapped bin (no middle bins).
-    """
-    idx = index
-    s, e = coords
-    bin_start = idx.coord_to_bin(s)
-    bin_end = idx.coord_to_bin(e)
-
-    # widen outward only: left edge searches left, right edge searches right
-    left_bin = idx.closest_nonzero_bin_left(bin_start)
-    right_bin = idx.closest_nonzero_bin_right(bin_end)
-    if left_bin is None or right_bin is None:
-        return np.empty((0, 2), dtype=np.uint64), (None, None), (bin_start, bin_end), idx
-
-    left_bin = int(left_bin)
-    right_bin = int(right_bin)
-
-    left_ranges = idx.get_bins(left_bin)
-    if right_bin == left_bin:
-        ranges = left_ranges
-    else:
-        right_ranges = idx.get_bins(right_bin)
-        ranges = np.concatenate([left_ranges, right_ranges], axis=0)
-
-    return ranges, (left_bin, right_bin), (bin_start, bin_end)

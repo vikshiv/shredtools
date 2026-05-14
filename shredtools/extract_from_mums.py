@@ -8,7 +8,7 @@ import mumemto.viz_mums
 from matplotlib import pyplot as plt
 from matplotlib.collections import PolyCollection
 from tqdm.auto import tqdm
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 
 from shredtools import utils as sutils
 
@@ -20,7 +20,7 @@ def parse_arguments(args=None):
     parser.add_argument("--plot", action="store_true", help="If set, generate a visualization of the extracted region using MUMs from MUM file.")
     parser.add_argument("--plot-full", action="store_true", help="If set, generate a visualization of the extracted region using all MUMs from MUM file.")
     parser.add_argument("--fasta", action="store_true", help="If set, generate a FASTA file for each sequence that contains the target sequence. Otherwise, only write a BED file of coordinates.")
-    parser.add_argument("--output", '-o', type=str, default="output", help="Output prefix for shreds. With --fasta, specifies directory to store shred sequences")
+    parser.add_argument("--output", '-o', type=str, default=None, help="Output prefix for shreds. With --fasta, specifies directory to store shred sequences")
     parser.add_argument("--sequences", '-x', type=int, nargs='*', default=None, help="One or more sequence indices to output BED or FASTA for. By default, all sequences are included.")
     parser.add_argument('--lengths','-l', dest='lens', help='lengths file, first column is seq length in order of filelist')
     parser.add_argument('--bumblbi','-b', dest='bi', help='Path or URL to bumbl index (default: <mum_file>.bi)')
@@ -51,25 +51,115 @@ def parse_arguments(args=None):
         if not os.path.exists(args.lens):
             print(f"Lengths file {args.lens} not found, and no lengths file provided", file=sys.stderr)
             raise SystemExit(1)
+        
+    if args.output is None and (args.fasta or args.plot_full or args.plot):
+        print('Output prefix required for plotting or fasta output.', file=sys.stderr)
+        raise SystemExit(1)
     return args
 
 def find_target_region(coll_mums, coords, seq_idx, sequences):
     starts = coll_mums.starts
-    left_mum_idx = bisect_left(starts[:, seq_idx], coords[0]) - 1
-    right_mum_idx = bisect_left(starts[:, seq_idx] + coll_mums.lengths, coords[1])
+    ### bisect_right is correct for both edge cases of landing on the MUM boundary
+    left_mum_idx = bisect_right(starts[:, seq_idx], coords[0]) - 1
+    right_mum_idx = bisect_right(starts[:, seq_idx] + coll_mums.lengths, coords[1])
     mum_bounds = (left_mum_idx, right_mum_idx)
     left_mum, right_mum = coll_mums[mum_bounds[0]], coll_mums[mum_bounds[1]]
-    left_bound = left_mum.starts[seq_idx]
+    ### sanity check
+    assert (coords[0] >= left_mum.starts[seq_idx]) and (coords[1] < right_mum.starts[seq_idx] + right_mum.length)
+    ### outer edges of bounding region (both exclusive)
+    left_bound = left_mum.starts[seq_idx] + left_mum.length - 1
     right_bound = right_mum.starts[seq_idx]
     left_offset, right_offset = 0, 0
+    left_margin, right_margin = None, None
     if coords[0] < left_mum.starts[seq_idx] + left_mum.length:
         left_offset = coords[0] - left_mum.starts[seq_idx]
-    if coords[1] > right_mum.starts[seq_idx]:
+        left_margin = 0
+    else:
+        left_margin = coords[0] - left_bound
+    if coords[1] >= right_mum.starts[seq_idx]:
         right_offset = coords[1] - right_mum.starts[seq_idx]
-    print("left margin:", coords[0] - left_bound - left_offset, file=sys.stderr)
-    print("right margin:", right_bound + right_offset - coords[1], file=sys.stderr)
+        right_margin = 0
+    else:
+        right_margin = right_bound - coords[1]
+    print(f"left margin: {left_margin}", file=sys.stderr)
+    print(f"right margin: {right_margin}", file=sys.stderr)
     other_coords = [(starts[mum_bounds[0], i] + left_offset, starts[mum_bounds[1], i] + right_offset) for i in sequences]
     return mum_bounds, other_coords
+
+def get_mum_ranges_flanks(index, coords):
+    """
+    Return only the *flanking* bin ranges for `coords` on `seq_idx`.
+
+    - Uses `index.coord_to_bin(coord)` for bin math (kept in index machinery).
+    - Widens outward only: left edge searches left, right edge searches right.
+    - Only returns ranges for the left snapped bin and right snapped bin (no middle bins).
+    - Uses stored per-bin spans to optionally slide one bin outward if the snapped
+      non-empty bin cannot left/right-bound the query start/end.
+    - Returns None on any failure (same outcome as no usable flanks); callers print one message.
+    """
+    idx = index
+    s, e = coords
+    bin_start = idx.coord_to_bin(s)
+    bin_end = idx.coord_to_bin(e)
+    
+    if bin_start > idx.max_bin or bin_end > idx.max_bin:
+        return None
+
+    # widen outward only: left edge searches left, right edge searches right
+    left_bin = idx.closest_nonzero_bin_left(bin_start)
+    right_bin = idx.closest_nonzero_bin_right(bin_end)
+    if left_bin is None or right_bin is None:
+        # case where there's no non-empty bin to the left and/or right
+        return None
+
+    # Now check if the bins have bounding mums for the query coords
+    # if they do not, slide left (or right) until you find a non-empty bin (generally just the next one)
+    if not idx.contains_left_bound(left_bin, s):
+        if left_bin <= 0:
+            return None
+        left_bin = idx.closest_nonzero_bin_left(left_bin - 1)
+        if left_bin is None or not idx.contains_left_bound(left_bin, s):
+            return None
+
+    if not idx.contains_right_bound(right_bin, e):
+        if right_bin >= idx.max_bin:
+            return None
+        right_bin = idx.closest_nonzero_bin_right(right_bin + 1)
+        if right_bin is None or not idx.contains_right_bound(right_bin, e):
+            return None
+
+    left_bin = int(left_bin)
+    right_bin = int(right_bin)
+
+    left_ranges = idx.get_bins(left_bin)
+    if right_bin == left_bin:
+        ranges = left_ranges
+    else:
+        right_ranges = idx.get_bins(right_bin)
+        ranges = np.concatenate([left_ranges, right_ranges], axis=0)
+
+    return ranges
+
+def safe_convert_global_to_local_coords(
+    global_start,
+    global_end,
+    contig_name,
+    seq_lengths_multi,
+    *,
+    on_fail_prefix,
+    path_for_msg,
+):
+    try:
+        return sutils.convert_global_to_local_coords(
+            global_start, global_end, contig_name, seq_lengths_multi
+        )
+    except AssertionError as e:
+        reason = e.args[0] if e.args else str(e)
+        print(
+            f"Skipping {on_fail_prefix} for {os.path.basename(path_for_msg)}: {reason}",
+            file=sys.stderr,
+        )
+        return None
 
 
 
@@ -79,35 +169,43 @@ def extract_fasta(output_prefix, lengths_file, contig_names, seq_lengths_multi, 
         p = paths[i]
         with open(p, 'r') as f:
             seq = ''.join(line.strip() for line in f if not line.startswith('>'))
-            try:
-                name, rel_offsets = sutils.convert_global_to_local_coords(other_coords[i][0], other_coords[i][1], contig_names[i], seq_lengths_multi[i])
-                coord_line = f"{name}:{rel_offsets[0]}-{rel_offsets[1]}"
-                with open(os.path.join(output_prefix, os.path.basename(p).replace('.fa', f'.extract.fa')), 'w') as out:
-                    out.write(f'>{os.path.splitext(os.path.basename(p))[0]}_{coord_line}\n{seq[other_coords[i][0] : other_coords[i][1]]}\n')
-            except AssertionError as e:
-                reason = e.args[0] if e.args else str(e)
-                print(
-                    f"Skipping FASTA for {os.path.basename(p)}: {reason}",
-                    file=sys.stderr,
-                )
+            converted = safe_convert_global_to_local_coords(
+                other_coords[i][0],
+                other_coords[i][1],
+                contig_names[i],
+                seq_lengths_multi[i],
+                on_fail_prefix="FASTA",
+                path_for_msg=p,
+            )
+            if converted is None:
                 continue
+            name, rel_offsets = converted
+            coord_line = f"{name}:{rel_offsets[0]}-{rel_offsets[1]}"
+            with open(os.path.join(output_prefix, os.path.basename(p).replace('.fa', f'.extract.fa')), 'w') as out:
+                out.write(f'>{os.path.splitext(os.path.basename(p))[0]}_{coord_line}\n{seq[other_coords[i][0] : other_coords[i][1]]}\n')
 
 def extract_bed(output_prefix, lengths_file, contig_names, seq_lengths_multi, other_coords, sequences):
     paths = mutils.get_seq_paths(lengths_file)
-    with open(output_prefix + ".bed", "w") as bed_file:
-        for i in range(len(sequences)):
-            p = paths[i]
-            try:
-                name, rel_offsets = sutils.convert_global_to_local_coords(other_coords[i][0], other_coords[i][1], contig_names[i], seq_lengths_multi[i])
-            except AssertionError as e:
-                reason = e.args[0] if e.args else str(e)
-                print(
-                    f"Skipping BED line for {os.path.basename(p)}: {reason}",
-                    file=sys.stderr,
-                )
-                continue
-            bed_file.write(f"{name}\t{rel_offsets[0]}\t{rel_offsets[1]}\t{p}\n")
-
+    if output_prefix is None:
+        bed_file = sys.stdout
+    else:
+        bed_file = open(output_prefix + ".bed", "w")
+    for i in range(len(sequences)):
+        p = paths[i]
+        converted = safe_convert_global_to_local_coords(
+            other_coords[i][0],
+            other_coords[i][1],
+            contig_names[i],
+            seq_lengths_multi[i],
+            on_fail_prefix="BED line",
+            path_for_msg=p,
+        )
+        if converted is None:
+            continue
+        name, rel_offsets = converted
+        bed_file.write(f"{name}\t{rel_offsets[0]}\t{rel_offsets[1]}\t{p}\n")
+    if output_prefix is not None:
+        bed_file.close()
 
 def plot(genome_lengths, polygons, colors, centering, xlims = None, size=None, genomes=None):
     fig, ax = plt.subplots()
@@ -164,11 +262,11 @@ def plot_full_synteny(args, coords, mums, mum_bounds, other_coords, seq_idx, seq
         mums.lengths.copy(), 
         mums.starts[:, sequences].copy(), 
         mums.strands[:, sequences].copy(),
-        blocks = mums.blocks.copy()
     )
     # plot_mums.starts -= offsets[:,0]
     start, end = np.array(coords)# - offsets[seq_idx,0]
     centering= [0] * len(sequences)
+    plot_mums.blocks = mutils.find_coll_blocks(plot_mums, max_break=100)
     poly, colors = mumemto.viz_mums.get_block_polygons(plot_mums.blocks, plot_mums, centering, inv_color='green')
     fig, ax = plot(np.array(seq_lengths)[sequences], poly, colors, centering, size=(10,5))
     ax.plot([start, start], [seq_idx - 0.5, seq_idx + 0.5], color='red', linestyle='--', linewidth=1)
@@ -194,15 +292,16 @@ def main(args=None):
         args.sequences = list(range(NUM_SEQS))
     coords = sutils.convert_local_to_global_coords(args.range, contig_names[args.seq_idx], seq_lengths_multi[args.seq_idx])
     idx = sutils.parse_index(args.bi, seq_idx=args.seq_idx)
-    ranges, snapped_bins, requested_bins = sutils.get_mum_ranges_flanks(idx, coords)
-    if ranges.shape[0] == 0:
+    ranges = get_mum_ranges_flanks(idx, coords)
+    if ranges is None:
         print(
-            f"No MUM ranges found for bins {requested_bins} (snapped to {snapped_bins}).",
+            f"No bounding MUMs found for region {args.range}.",
             file=sys.stderr,
         )
         raise SystemExit(1)
 
     mums = sutils.parse_bumbl_range(args.mum_file, ranges)
+    mums.sort(args.seq_idx)
 
     mum_bounds, other_coords = find_target_region(mums, coords, args.seq_idx, args.sequences)
     if args.plot:
