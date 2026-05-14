@@ -56,7 +56,12 @@
   </div>
   <div class="clear"></div>
 
-  <p class="hint" id="lengthsHint">Loading bundled lengths…</p>
+  <p class="hint" id="lengthsHint">Loading lengths from S3…</p>
+
+  <div class="row">
+    <label for="pangenome">Pangenome</label>
+    <select id="pangenome" disabled></select>
+  </div>
 
   <div class="row">
     <label for="genome">Genome</label>
@@ -340,7 +345,6 @@ if "/" not in sys.path:
       await pyodide.runPythonAsync("import app as _a; getattr(_a, 'INTRO', '') or ''")
     ).trim();
     renderIntroMarkdown(intro, $("appIntroWrap"));
-    status("Ready.", `elapsed ${secs()}`);
 
     let manifest = null;
     let selectedSeqs = null; // Set<number>; null means not initialized yet
@@ -348,6 +352,9 @@ if "/" not in sys.path:
     let lastMeta = null;
     let lastUnavailable = null;
     let geneIndex = null; // { [gene: string]: Array<{contig,start,end,label}> }
+    let pangenomeList = null;
+    /** MEMFS path for the active preset’s `.lengths` (matches `app.current_lengths_path()`). */
+    let currentLengthsMemfsPath = null;
 
     const buildToSeqIdx = {
       "CHM13v2.0": 0,
@@ -530,10 +537,11 @@ if "/" not in sys.path:
       status("Interval set from gene.", `${g} → ${contigWanted}:${hit.start}-${hit.end}`);
     }
 
-    async function initFromLengthsInFS() {
+    async function initFromLengthsInFS(lengthsPath) {
       status("Parsing lengths…", `building dropdowns (elapsed ${secs()})`);
+      const pathEsc = JSON.stringify(lengthsPath);
       const jsonStr = String(
-        await pyodide.runPythonAsync(`import app; app.describe_ui("/data.lengths")`)
+        await pyodide.runPythonAsync(`import app; app.describe_ui(${pathEsc})`)
       );
       manifest = JSON.parse(jsonStr);
       fillGenomeOptions();
@@ -547,6 +555,26 @@ if "/" not in sys.path:
       status("Lengths loaded. Set interval and click Run.", `elapsed ${secs()}`);
       // Gene UI visibility + loading is driven by the selected genome (seq_idx).
       $("genome").dispatchEvent(new Event("change"));
+    }
+
+    async function loadPangenomeAndInitUI(key) {
+      const opt = pangenomeList.find((o) => o.key === key);
+      if (!opt) throw new Error(`Unknown pangenome: ${key}`);
+      status("Loading lengths…", opt.lengths_url);
+      const res = await fetch(opt.lengths_url);
+      if (!res.ok) {
+        throw new Error(`Lengths fetch failed (${res.status}). Upload ${key} .lengths to S3 or check the URL.`);
+      }
+      const buf = await res.arrayBuffer();
+      const memPath = String(
+        await pyodide.runPythonAsync(`import app; app.lengths_memfs_path(${JSON.stringify(key)})`)
+      ).trim();
+      pyodide.FS.writeFile(memPath, new Uint8Array(buf));
+      await pyodide.runPythonAsync(`import app; app.set_active_pangenome(${JSON.stringify(key)})`);
+      currentLengthsMemfsPath = String(
+        await pyodide.runPythonAsync("import app; app.current_lengths_path()")
+      ).trim();
+      await initFromLengthsInFS(currentLengthsMemfsPath);
     }
 
     function updateSeqSummary() {
@@ -647,6 +675,33 @@ if "/" not in sys.path:
       sel.disabled = false;
     }
 
+    $("pangenome").addEventListener("change", async () => {
+      const key = $("pangenome").value;
+      $("pangenome").disabled = true;
+      $("genome").disabled = true;
+      $("contig").disabled = true;
+      $("run").disabled = true;
+      $("start").disabled = true;
+      $("end").disabled = true;
+      $("region").disabled = true;
+      lastRows = null;
+      lastMeta = null;
+      lastUnavailable = null;
+      $("out").value = "";
+      $("bounds").textContent = "";
+      renderIntervalsTable([]);
+      renderUnavailableTable([]);
+      try {
+        await loadPangenomeAndInitUI(key);
+        status("Pangenome switched.", `elapsed ${secs()}`);
+      } catch (e) {
+        $("lengthsHint").textContent = "Lengths load failed.";
+        status("Error", String(e?.message ?? e));
+      } finally {
+        $("pangenome").disabled = false;
+      }
+    });
+
     $("genome").addEventListener("change", () => {
       if (!manifest) return;
       syncContigOptions();
@@ -723,6 +778,10 @@ await app.warm_index(${seqIdx})
         status("Still loading…");
         return;
       }
+      if (!currentLengthsMemfsPath) {
+        status("Error", "Lengths path not ready; wait for pangenome to finish loading.");
+        return;
+      }
       const seqIdx = parseInt($("genome").value, 10);
       let contig = $("contig").value;
       let start = Number($("start").value);
@@ -757,10 +816,11 @@ await app.warm_index(${seqIdx})
       renderIntervalsTable([]);
       renderUnavailableTable([]);
       try {
+        const lp = JSON.stringify(currentLengthsMemfsPath);
         const resultJson = String(
           await pyodide.runPythonAsync(`
 import app
-await app.run_with_bounds("/data.lengths", ${seqIdx}, ${JSON.stringify(rangeStr)}, None)
+await app.run_with_bounds(${lp}, ${seqIdx}, ${JSON.stringify(rangeStr)}, None)
           `)
         );
         const result = JSON.parse(resultJson);
@@ -796,23 +856,29 @@ await app.run_with_bounds("/data.lengths", ${seqIdx}, ${JSON.stringify(rangeStr)
       }
     });
 
-    // Try to auto-load a default lengths file served next to index.html.
+    // Load default pangenome (HPRCr2 enhanced): `.lengths` from S3, then build dropdowns.
     (async () => {
       try {
-        const lengthsUrl = new URL("hprcv2_enhanced_merged.lengths", base);
-        status("Loading lengths…", `fetching default lengths (elapsed ${secs()})`);
-        const res = await fetch(lengthsUrl);
-        if (!res.ok) {
-          $("lengthsHint").textContent = "Bundled lengths file is missing.";
-          status("Error", "Bundled lengths file is missing.");
-          return;
+        pangenomeList = JSON.parse(
+          String(await pyodide.runPythonAsync("import app; app.pangenome_options_json()"))
+        );
+        const ps = $("pangenome");
+        ps.innerHTML = "";
+        for (const o of pangenomeList) {
+          const op = document.createElement("option");
+          op.value = o.key;
+          op.textContent = o.label;
+          ps.appendChild(op);
         }
-        const buf = await res.arrayBuffer();
-        pyodide.FS.writeFile("/data.lengths", new Uint8Array(buf));
-        await initFromLengthsInFS();
+        ps.value = "hprcv2_enhanced";
+        ps.disabled = true;
+        await loadPangenomeAndInitUI(ps.value);
+        status("Ready.", `elapsed ${secs()}`);
       } catch (e) {
-        $("lengthsHint").textContent = "Could not load bundled lengths file.";
-        status("Error", "Could not load bundled lengths file.");
+        $("lengthsHint").textContent = "Could not load lengths from S3.";
+        status("Error", String(e?.message ?? e));
+      } finally {
+        $("pangenome").disabled = false;
       }
     })();
   </script>

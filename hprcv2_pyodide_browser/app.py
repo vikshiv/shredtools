@@ -16,12 +16,77 @@ We use two different datasets from the Human Pangenome Reference Consortium (HPR
 
 All indexes are hosted thanks to the AWS Open Data Sponsorship Program and are freely available to query and for download and offline use.
 """
-BUMBL_BI_URL = "https://genome-idx.s3.amazonaws.com/mumemto/hprcv2_enhanced_merged.bumbl.bi"
-BUMBL_URL = "https://genome-idx.s3.amazonaws.com/mumemto/hprcv2_enhanced_merged.bumbl"
+_S3_MUMEMTO = "https://genome-idx.s3.amazonaws.com/mumemto"
 
-# Caches (modest memory): lengths metadata and indices reused across runs.
-_LENGTHS_META = {}  # lengths_path -> (seq_lengths_multi, contig_names, num_seqs)
-_INDEX_BY_SEQ = {}  # seq_idx -> parsed index for BUMBL_BI_URL
+# Each preset: .bumbl, .bumbl.bi, and .lengths on S3 (same bucket path pattern).
+# Order preserved for dropdown: enhanced default, then HPRCr2 merged, then HPRCr1.
+PANGENOMES: dict[str, dict[str, str]] = {
+    "hprcv2_enhanced": {
+        "label": "HPRCr2 (enhanced)",
+        "bumbl": f"{_S3_MUMEMTO}/hprcv2_enhanced_merged.bumbl",
+        "bi": f"{_S3_MUMEMTO}/hprcv2_enhanced_merged.bumbl.bi",
+        "lengths": f"{_S3_MUMEMTO}/hprcv2_enhanced_merged.lengths",
+    },
+    "hprcv2_merged": {
+        "label": "HPRCr2",
+        "bumbl": f"{_S3_MUMEMTO}/hprcv2_merged.bumbl",
+        "bi": f"{_S3_MUMEMTO}/hprcv2_merged.bumbl.bi",
+        "lengths": f"{_S3_MUMEMTO}/hprcv2_merged.lengths",
+    },
+    "hprcv1": {
+        "label": "HPRCr1",
+        "bumbl": f"{_S3_MUMEMTO}/hprcv1.bumbl",
+        "bi": f"{_S3_MUMEMTO}/hprcv1.bumbl.bi",
+        "lengths": f"{_S3_MUMEMTO}/hprcv1.lengths",
+    },
+}
+
+ACTIVE_PANGENOME = "hprcv2_enhanced"
+
+# Caches (modest memory): lengths by MEMFS path; index by "pangenome_key:seq_idx".
+_LENGTHS_META: dict = {}
+_INDEX_BY_SEQ: dict = {}
+
+
+def lengths_memfs_path(pangenome_key: str | None = None) -> str:
+    """MEMFS path where the browser should write the `.lengths` bytes for a preset."""
+    k = ACTIVE_PANGENOME if pangenome_key is None else pangenome_key
+    if k not in PANGENOMES:
+        raise ValueError(f"Unknown pangenome {k!r}")
+    return f"/data.{k}.lengths"
+
+
+def current_lengths_path() -> str:
+    return lengths_memfs_path(ACTIVE_PANGENOME)
+
+
+def pangenome_options_json() -> str:
+    """Dropdown options: key, UI label, lengths URL (fetch from browser before set_active)."""
+    order = ["hprcv2_enhanced", "hprcv2_merged", "hprcv1"]
+    out = []
+    for k in order:
+        if k in PANGENOMES:
+            p = PANGENOMES[k]
+            out.append({"key": k, "label": p["label"], "lengths_url": p["lengths"]})
+    return json.dumps(out)
+
+
+def set_active_pangenome(key: str) -> None:
+    """Switch active S3 trio; clears lengths + index caches (call after new lengths file is written)."""
+    global ACTIVE_PANGENOME
+    if key not in PANGENOMES:
+        raise ValueError(f"Unknown pangenome {key!r}")
+    ACTIVE_PANGENOME = key
+    _LENGTHS_META.clear()
+    _INDEX_BY_SEQ.clear()
+
+
+def _active_bumbl_bi() -> str:
+    return PANGENOMES[ACTIVE_PANGENOME]["bi"]
+
+
+def _active_bumbl() -> str:
+    return PANGENOMES[ACTIVE_PANGENOME]["bumbl"]
 
 
 def _get_lengths_meta(lengths_path: str):
@@ -35,19 +100,25 @@ def _get_lengths_meta(lengths_path: str):
     return meta
 
 
+def _index_cache_key(seq_idx: int) -> str:
+    return f"{ACTIVE_PANGENOME}:{int(seq_idx)}"
+
+
 async def _get_index(seq_idx: int):
-    idx = _INDEX_BY_SEQ.get(int(seq_idx))
+    ck = _index_cache_key(seq_idx)
+    idx = _INDEX_BY_SEQ.get(ck)
     if idx is not None:
         return idx, True
-    idx = await sutils.parse_index(BUMBL_BI_URL, seq_idx=int(seq_idx))
-    _INDEX_BY_SEQ[int(seq_idx)] = idx
+    idx = await sutils.parse_index(_active_bumbl_bi(), seq_idx=int(seq_idx))
+    _INDEX_BY_SEQ[ck] = idx
     return idx, False
 
 
 async def warm_index(seq_idx: int) -> bool:
     """Preload the index for seq_idx; used on genome dropdown change."""
-    idx = await sutils.parse_index(BUMBL_BI_URL, seq_idx=int(seq_idx))
-    _INDEX_BY_SEQ[int(seq_idx)] = idx
+    ck = _index_cache_key(seq_idx)
+    idx = await sutils.parse_index(_active_bumbl_bi(), seq_idx=int(seq_idx))
+    _INDEX_BY_SEQ[ck] = idx
     return True
 
 
@@ -151,7 +222,7 @@ async def _get_mums_expanding(idx, coords, seq_idx, max_steps: int = 8):
         if not ranges:
             return None, [], (bin_start, bin_end)
 
-        mums = await sutils.parse_bumbl_range(BUMBL_URL, ranges)
+        mums = await sutils.parse_bumbl_range(_active_bumbl(), ranges)
         mums = sutils.sort_mums_by_seq_column(mums, seq_idx)
         starts_col = mums.starts_col(seq_idx)
         right_key = [starts_col[i] + int(mums.lengths[i]) for i in range(int(mums.num_mums))]
