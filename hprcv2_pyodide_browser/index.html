@@ -42,6 +42,22 @@
     details { font-size: 0.9rem; margin: 0.75rem 0; padding: 0.5rem 0.75rem; background: #f7f7f7; border-radius: 4px; }
     details summary { cursor: pointer; color: #222; }
     details p { margin: 0.5rem 0 0; }
+    th.col-contig, td.col-contig {
+      max-width: 7rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #lengthsHistCanvas {
+      width: 100%;
+      max-width: 100%;
+      height: 240px;
+      display: block;
+      margin: 0.35rem 0 0.5rem;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
   </style>
 </head>
 <body>
@@ -126,19 +142,21 @@
     <button class="tab" id="tabTable" role="tab" aria-selected="true" aria-controls="panelTable" type="button">Table</button>
     <button class="tab" id="tabBed" role="tab" aria-selected="false" aria-controls="panelBed" type="button">BED</button>
     <button class="tab" id="tabUnavailable" role="tab" aria-selected="false" aria-controls="panelUnavailable" type="button">Unavailable</button>
+    <button class="tab" id="tabLengths" role="tab" aria-selected="false" aria-controls="panelLengths" type="button">Lengths</button>
   </div>
   <div id="panelTable" class="panel active" role="tabpanel" aria-labelledby="tabTable">
     <table aria-label="Intervals">
       <thead>
         <tr>
           <th>genome</th>
-          <th>contig</th>
+          <th class="col-contig">contig</th>
           <th>start</th>
           <th>end</th>
+          <th>length</th>
         </tr>
       </thead>
       <tbody id="bedTableBody">
-        <tr><td colspan="4" class="hint">Run a query to populate.</td></tr>
+        <tr><td colspan="5" class="hint">Run a query to populate.</td></tr>
       </tbody>
     </table>
   </div>
@@ -159,6 +177,10 @@
         <tr><td colspan="3" class="hint">Assemblies spanning multiple contigs will be listed here.</td></tr>
       </tbody>
     </table>
+  </div>
+  <div id="panelLengths" class="panel" role="tabpanel" aria-labelledby="tabLengths">
+    <p id="lengthsHistHint" class="hint">Run a query to see length distribution across selected assemblies.</p>
+    <canvas id="lengthsHistCanvas" width="800" height="240" aria-label="Histogram of region lengths in base pairs"></canvas>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
@@ -243,83 +265,9 @@
       return s;
     }
 
-    function setActiveTab(which) {
-      const isTable = which === "table";
-      const isBed = which === "bed";
-      const isUnavail = which === "unavailable";
-      $("tabTable").setAttribute("aria-selected", String(isTable));
-      $("tabBed").setAttribute("aria-selected", String(isBed));
-      $("tabUnavailable").setAttribute("aria-selected", String(isUnavail));
-      $("panelTable").classList.toggle("active", isTable);
-      $("panelBed").classList.toggle("active", isBed);
-      $("panelUnavailable").classList.toggle("active", isUnavail);
-    }
-
-    $("tabTable").addEventListener("click", () => setActiveTab("table"));
-    $("tabBed").addEventListener("click", () => setActiveTab("bed"));
-    $("tabUnavailable").addEventListener("click", () => setActiveTab("unavailable"));
-
-    function renderIntervalsTable(rows) {
-      const body = $("bedTableBody");
-      body.innerHTML = "";
-      const rr = Array.isArray(rows) ? rows : [];
-      if (rr.length === 0) {
-        const tr = document.createElement("tr");
-        const td = document.createElement("td");
-        td.colSpan = 4;
-        td.className = "hint";
-        td.textContent = "No output.";
-        tr.appendChild(td);
-        body.appendChild(tr);
-        return;
-      }
-      for (const r of rr) {
-        const raw = String(r?.contig ?? "");
-        const genome = prettyGenome(raw);
-        const contig = prettyContig(raw);
-        const tr = document.createElement("tr");
-        const tdG = document.createElement("td");
-        tdG.textContent = genome;
-        const tdC = document.createElement("td");
-        tdC.textContent = contig;
-        const tdS = document.createElement("td");
-        tdS.textContent = String(r?.start ?? "");
-        const tdE = document.createElement("td");
-        tdE.textContent = String(r?.end ?? "");
-        tr.appendChild(tdG);
-        tr.appendChild(tdC);
-        tr.appendChild(tdS);
-        tr.appendChild(tdE);
-        body.appendChild(tr);
-      }
-    }
-
-    function renderUnavailableTable(unavailable) {
-      const body = $("unavailTableBody");
-      body.innerHTML = "";
-      const rows = Array.isArray(unavailable) ? unavailable : [];
-      if (rows.length === 0) {
-        const tr = document.createElement("tr");
-        const td = document.createElement("td");
-        td.colSpan = 3;
-        td.className = "hint";
-        td.textContent = "None.";
-        tr.appendChild(td);
-        body.appendChild(tr);
-        return;
-      }
-      for (const r of rows) {
-        const tr = document.createElement("tr");
-        const genome = prettyGenome(r?.label ?? `seq_${r?.seq_idx ?? ""}`);
-        const c1 = String(r?.contig_a ?? "");
-        const c2 = String(r?.contig_b ?? "");
-        for (const v of [genome, c1, c2]) {
-          const td = document.createElement("td");
-          td.textContent = v;
-          tr.appendChild(td);
-        }
-        body.appendChild(tr);
-      }
+    function regionLength(r) {
+      const d = Number(r?.end) - Number(r?.start);
+      return Number.isFinite(d) ? Math.max(0, d) : 0;
     }
 
     status("Loading Pyodide…", `elapsed ${secs()}`);
@@ -363,6 +311,243 @@ if "/" not in sys.path:
     let geneIndex = null; // { [gene: string]: Array<{contig,start,end,label}> }
     let pangenomeList = null;
     /** Lengths: ``pangenome_lengths.json`` → MEMFS → ``app.load_lengths_bundle_path``. */
+
+    const LENGTH_HIST_NUM_BINS = 40;
+
+    function getFilteredRows() {
+      if (!lastRows || !manifest) return [];
+      const keep = selectedSeqs ? selectedSeqs : new Set(manifest.genomes.map((g) => g.seq_idx));
+      return lastRows.filter((r) => keep.has(r.seq_idx));
+    }
+
+    function fmtBp(n) {
+      return Number.isFinite(n) ? Math.round(n).toLocaleString() : "";
+    }
+
+    /** Integer tick positions from 0 to maxY inclusive (for count axis). */
+    function countAxisTicks(maxY, desiredSteps = 5) {
+      if (maxY <= 0) return [0];
+      const step = Math.max(1, Math.ceil(maxY / desiredSteps));
+      const out = [];
+      for (let v = 0; v <= maxY; v += step) out.push(v);
+      if (out[out.length - 1] !== maxY) out.push(maxY);
+      return out;
+    }
+
+    function renderLengthsView(rows) {
+      const canvas = $("lengthsHistCanvas");
+      const hint = $("lengthsHistHint");
+      if (!canvas || !hint) return;
+      const ctx = canvas.getContext("2d");
+      const rr = Array.isArray(rows) ? rows : [];
+
+      const panel = $("panelLengths");
+      const rect = canvas.getBoundingClientRect();
+      const cssW = Math.max(320, (panel && panel.offsetWidth) || rect.width || canvas.clientWidth || 800);
+      const cssH = 240;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.style.height = `${cssH}px`;
+      canvas.width = Math.floor(cssW * dpr);
+      canvas.height = Math.floor(cssH * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      if (rr.length === 0) {
+        hint.textContent = "No output. Run a query or select assemblies in the sequence list.";
+        ctx.fillStyle = "#fafafa";
+        ctx.fillRect(0, 0, cssW, cssH);
+        return;
+      }
+
+      const lengths = rr.map(regionLength);
+      const n = lengths.length;
+      const minL = Math.min(...lengths);
+      const maxL = Math.max(...lengths);
+      hint.textContent = `Region lengths (bp) for ${n.toLocaleString()} assembly row(s): min ${fmtBp(minL)}, max ${fmtBp(maxL)}.`;
+
+      let numBins = Math.min(LENGTH_HIST_NUM_BINS, Math.max(1, n));
+      const counts = new Array(numBins).fill(0);
+      const lo = minL;
+      const hi = maxL;
+      let step;
+      if (hi === lo) {
+        numBins = 1;
+        step = 1;
+        counts[0] = n;
+      } else {
+        step = (hi - lo) / numBins;
+        for (const L of lengths) {
+          let i = Math.floor((L - lo) / step);
+          if (i < 0) i = 0;
+          if (i >= numBins) i = numBins - 1;
+          counts[i]++;
+        }
+      }
+
+      const maxCount = Math.max(1, ...counts);
+      const yTicks = countAxisTicks(maxCount, 5);
+      const margin = { L: 58, R: 12, T: 20, B: 36 };
+      const pw = cssW - margin.L - margin.R;
+      const ph = cssH - margin.T - margin.B;
+      const plotLeft = margin.L;
+      const plotRight = margin.L + pw;
+      const plotTop = margin.T;
+      const plotBot = margin.T + ph;
+
+      ctx.fillStyle = "#fafafa";
+      ctx.fillRect(0, 0, cssW, cssH);
+
+      ctx.strokeStyle = "#e8e8e8";
+      ctx.lineWidth = 1;
+      for (const tick of yTicks) {
+        const y = plotBot - (tick / maxCount) * ph;
+        ctx.beginPath();
+        ctx.moveTo(plotLeft, y);
+        ctx.lineTo(plotRight, y);
+        ctx.stroke();
+      }
+
+      const bw = pw / numBins;
+      ctx.fillStyle = "#5a7cb0";
+      for (let i = 0; i < numBins; i++) {
+        const h = (counts[i] / maxCount) * ph;
+        const x = plotLeft + i * bw + 1;
+        const y = plotBot - h;
+        const wbar = Math.max(0, bw - 2);
+        if (h > 0) ctx.fillRect(x, y, wbar, h);
+      }
+
+      ctx.strokeStyle = "#888";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(plotLeft, plotTop);
+      ctx.lineTo(plotLeft, plotBot);
+      ctx.lineTo(plotRight, plotBot);
+      ctx.stroke();
+
+      ctx.fillStyle = "#444";
+      ctx.font = "12px system-ui,sans-serif";
+      ctx.textBaseline = "middle";
+      ctx.textAlign = "right";
+      for (const tick of yTicks) {
+        const y = plotBot - (tick / maxCount) * ph;
+        ctx.fillText(String(tick.toLocaleString()), plotLeft - 6, y);
+      }
+
+      ctx.save();
+      ctx.translate(14, plotTop + ph / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("Count", 0, 0);
+      ctx.restore();
+
+      ctx.textBaseline = "alphabetic";
+      ctx.textAlign = "center";
+      ctx.font = "12px system-ui,sans-serif";
+      ctx.fillStyle = "#444";
+      const xTickY = cssH - 20;
+      ctx.fillText(fmtBp(lo), plotLeft, xTickY);
+      ctx.fillText(fmtBp(hi), plotRight, xTickY);
+      if (hi !== lo) {
+        const mid = (lo + hi) / 2;
+        ctx.fillText(fmtBp(mid), plotLeft + pw / 2, xTickY);
+      }
+      ctx.font = "11px system-ui,sans-serif";
+      ctx.fillStyle = "#555";
+      ctx.fillText("Length (bp)", plotLeft + pw / 2, cssH - 6);
+    }
+
+    function setActiveTab(which) {
+      const isTable = which === "table";
+      const isBed = which === "bed";
+      const isUnavail = which === "unavailable";
+      const isLengths = which === "lengths";
+      $("tabTable").setAttribute("aria-selected", String(isTable));
+      $("tabBed").setAttribute("aria-selected", String(isBed));
+      $("tabUnavailable").setAttribute("aria-selected", String(isUnavail));
+      $("tabLengths").setAttribute("aria-selected", String(isLengths));
+      $("panelTable").classList.toggle("active", isTable);
+      $("panelBed").classList.toggle("active", isBed);
+      $("panelUnavailable").classList.toggle("active", isUnavail);
+      $("panelLengths").classList.toggle("active", isLengths);
+      if (isLengths) renderLengthsView(getFilteredRows());
+    }
+
+    $("tabTable").addEventListener("click", () => setActiveTab("table"));
+    $("tabBed").addEventListener("click", () => setActiveTab("bed"));
+    $("tabUnavailable").addEventListener("click", () => setActiveTab("unavailable"));
+    $("tabLengths").addEventListener("click", () => setActiveTab("lengths"));
+
+    function renderIntervalsTable(rows) {
+      const body = $("bedTableBody");
+      body.innerHTML = "";
+      const rr = Array.isArray(rows) ? rows : [];
+      if (rr.length === 0) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 5;
+        td.className = "hint";
+        td.textContent = "No output.";
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+      }
+      for (const r of rr) {
+        const raw = String(r?.contig ?? "");
+        const genome = prettyGenome(raw);
+        const contig = prettyContig(raw);
+        const tr = document.createElement("tr");
+        const tdG = document.createElement("td");
+        tdG.textContent = genome;
+        const tdC = document.createElement("td");
+        tdC.className = "col-contig";
+        tdC.textContent = contig;
+        tdC.title = contig;
+        const tdS = document.createElement("td");
+        tdS.className = "mono";
+        tdS.textContent = String(r?.start ?? "");
+        const tdE = document.createElement("td");
+        tdE.className = "mono";
+        tdE.textContent = String(r?.end ?? "");
+        const tdL = document.createElement("td");
+        tdL.className = "mono";
+        tdL.textContent = String(regionLength(r));
+        tr.appendChild(tdG);
+        tr.appendChild(tdC);
+        tr.appendChild(tdS);
+        tr.appendChild(tdE);
+        tr.appendChild(tdL);
+        body.appendChild(tr);
+      }
+    }
+
+    function renderUnavailableTable(unavailable) {
+      const body = $("unavailTableBody");
+      body.innerHTML = "";
+      const rows = Array.isArray(unavailable) ? unavailable : [];
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 3;
+        td.className = "hint";
+        td.textContent = "None.";
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+      }
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        const genome = prettyGenome(r?.label ?? `seq_${r?.seq_idx ?? ""}`);
+        const c1 = String(r?.contig_a ?? "");
+        const c2 = String(r?.contig_b ?? "");
+        for (const v of [genome, c1, c2]) {
+          const td = document.createElement("td");
+          td.textContent = v;
+          tr.appendChild(td);
+        }
+        body.appendChild(tr);
+      }
+    }
 
     const buildToSeqIdx = {
       "CHM13v2.0": 0,
@@ -586,6 +771,9 @@ if "/" not in sys.path:
       const bedText = rows.map((r) => `${r.contig}\t${r.start}\t${r.end}\t.\n`).join("");
       $("out").value = bedText;
       renderIntervalsTable(rows);
+      if ($("tabLengths").getAttribute("aria-selected") === "true") {
+        renderLengthsView(rows);
+      }
     }
 
     function renderSeqList() {
@@ -686,6 +874,7 @@ if "/" not in sys.path:
       $("bounds").textContent = "";
       renderIntervalsTable([]);
       renderUnavailableTable([]);
+      renderLengthsView([]);
       try {
         await loadPangenomeAndInitUI(key);
         status("Pangenome switched.", `elapsed ${secs()}`);
@@ -804,8 +993,10 @@ await app.warm_index(${seqIdx})
       status("Querying…", `HTTP Range reads to S3 (query ${secs(q0)})`);
       $("out").value = "";
       $("bounds").textContent = "";
+      lastRows = null;
       renderIntervalsTable([]);
       renderUnavailableTable([]);
+      renderLengthsView([]);
       try {
         const resultJson = String(
           await pyodide.runPythonAsync(`
@@ -843,6 +1034,7 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
         lastRows = null;
         lastMeta = null;
         lastUnavailable = null;
+        renderLengthsView([]);
       }
     });
 
