@@ -58,6 +58,59 @@
       border-radius: 4px;
       box-sizing: border-box;
     }
+    #plotBtn { display: none; }
+    #plotBtn.visible { display: inline-block; }
+    #syntenyImg {
+      width: 100%;
+      max-width: 100%;
+      height: auto;
+      display: none;
+      margin: 0.35rem 0 0.5rem;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+    #syntenyImg.visible { display: block; }
+    .plot-loading {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 1.5rem 1rem;
+      margin: 0.35rem 0 0.5rem;
+    }
+    .plot-loading.visible { display: flex; }
+    .plot-spinner {
+      width: 2rem;
+      height: 2rem;
+      border: 3px solid #e0e0e0;
+      border-top-color: #444;
+      border-radius: 50%;
+      animation: plot-spin 0.75s linear infinite;
+    }
+    @keyframes plot-spin {
+      to { transform: rotate(360deg); }
+    }
+    .plot-loading-bar {
+      width: min(100%, 18rem);
+      height: 4px;
+      background: #e8e8e8;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .plot-loading-bar::after {
+      content: "";
+      display: block;
+      height: 100%;
+      width: 40%;
+      background: #555;
+      border-radius: 2px;
+      animation: plot-bar-slide 1.1s ease-in-out infinite;
+    }
+    @keyframes plot-bar-slide {
+      0% { transform: translateX(-110%); }
+      100% { transform: translateX(350%); }
+    }
   </style>
 </head>
 <body>
@@ -122,6 +175,7 @@
 
   <div class="row">
     <button type="button" id="run" disabled>Run</button>
+    <button type="button" id="plotBtn" disabled>Plot</button>
   </div>
 
   <p id="status">Loading Pyodide…</p>
@@ -143,6 +197,7 @@
     <button class="tab" id="tabBed" role="tab" aria-selected="false" aria-controls="panelBed" type="button">BED</button>
     <button class="tab" id="tabUnavailable" role="tab" aria-selected="false" aria-controls="panelUnavailable" type="button">Unavailable</button>
     <button class="tab" id="tabLengths" role="tab" aria-selected="false" aria-controls="panelLengths" type="button">Lengths</button>
+    <button class="tab" id="tabSynteny" role="tab" aria-selected="false" aria-controls="panelSynteny" type="button">Synteny</button>
   </div>
   <div id="panelTable" class="panel active" role="tabpanel" aria-labelledby="tabTable">
     <table aria-label="Intervals">
@@ -181,6 +236,15 @@
   <div id="panelLengths" class="panel" role="tabpanel" aria-labelledby="tabLengths">
     <p id="lengthsHistHint" class="hint">Run a query to see length distribution across selected assemblies.</p>
     <canvas id="lengthsHistCanvas" width="800" height="240" aria-label="Histogram of region lengths in base pairs"></canvas>
+  </div>
+  <div id="panelSynteny" class="panel" role="tabpanel" aria-labelledby="tabSynteny">
+    <p id="syntenyHint" class="hint">Run a query, then click Plot to render MUM extract synteny (matplotlib loads on first plot).</p>
+    <div id="plotLoading" class="plot-loading" hidden aria-live="polite" aria-busy="false">
+      <div class="plot-spinner" role="progressbar" aria-label="Plot in progress"></div>
+      <div class="plot-loading-bar" aria-hidden="true"></div>
+      <span id="plotLoadingText" class="hint">Plotting…</span>
+    </div>
+    <img id="syntenyImg" alt="MUM extract synteny plot" />
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
@@ -277,11 +341,22 @@
     status("Loading app code…", `fetching local scripts (elapsed ${secs()})`);
     const uRes = await fetch(new URL("bumbl_index_utils.py", base));
     const aRes = await fetch(new URL("app.py", base));
+    const vRes = await fetch(new URL("viz_mums.py", base));
+    const sRes = await fetch(new URL("synteny_plot.py", base));
     if (!uRes.ok) throw new Error("Could not load bumbl_index_utils.py (serve this folder over HTTP, not file://).");
     if (!aRes.ok) throw new Error("Could not load app.py.");
-    const [uText, aText] = [await uRes.text(), await aRes.text()];
+    if (!vRes.ok) throw new Error("Could not load viz_mums.py.");
+    if (!sRes.ok) throw new Error("Could not load synteny_plot.py.");
+    const [uText, aText, vText, sText] = [
+      await uRes.text(),
+      await aRes.text(),
+      await vRes.text(),
+      await sRes.text(),
+    ];
     pyodide.FS.writeFile("/bumbl_index_utils.py", uText);
     pyodide.FS.writeFile("/app.py", aText);
+    pyodide.FS.writeFile("/viz_mums.py", vText);
+    pyodide.FS.writeFile("/synteny_plot.py", sText);
     status("Initializing Python…", `importing app (elapsed ${secs()})`);
     await pyodide.runPythonAsync(`
 import sys
@@ -311,8 +386,52 @@ if "/" not in sys.path:
     let geneIndex = null; // { [gene: string]: Array<{contig,start,end,label}> }
     let pangenomeList = null;
     /** Lengths: ``pangenome_lengths.json`` → MEMFS → ``app.load_lengths_bundle_path``. */
+    let mplReady = null;
 
     const LENGTH_HIST_NUM_BINS = 40;
+
+    function ensureMpl() {
+      if (!mplReady) {
+        mplReady = pyodide.loadPackage(["matplotlib", "numpy"]);
+      }
+      return mplReady;
+    }
+
+    function showPlotButton(show) {
+      const btn = $("plotBtn");
+      btn.classList.toggle("visible", !!show);
+      btn.disabled = !show;
+    }
+
+    function setPlotLoading(on, text) {
+      const wrap = $("plotLoading");
+      wrap.classList.toggle("visible", !!on);
+      wrap.hidden = !on;
+      wrap.setAttribute("aria-busy", String(!!on));
+      if (text) $("plotLoadingText").textContent = text;
+      if (on) {
+        $("syntenyImg").classList.remove("visible");
+        $("syntenyHint").hidden = true;
+      } else {
+        $("syntenyHint").hidden = false;
+      }
+    }
+
+    function clearSyntenyPlot() {
+      setPlotLoading(false);
+      const img = $("syntenyImg");
+      img.removeAttribute("src");
+      img.classList.remove("visible");
+      $("syntenyHint").textContent =
+        "Run a query, then click Plot to render MUM extract synteny (matplotlib loads on first plot).";
+      $("syntenyHint").hidden = false;
+    }
+
+    function getSelectedSeqIndices() {
+      if (!manifest) return [];
+      if (selectedSeqs) return [...selectedSeqs].sort((a, b) => a - b);
+      return manifest.genomes.map((g) => g.seq_idx);
+    }
 
     function getFilteredRows() {
       if (!lastRows || !manifest) return [];
@@ -462,14 +581,17 @@ if "/" not in sys.path:
       const isBed = which === "bed";
       const isUnavail = which === "unavailable";
       const isLengths = which === "lengths";
+      const isSynteny = which === "synteny";
       $("tabTable").setAttribute("aria-selected", String(isTable));
       $("tabBed").setAttribute("aria-selected", String(isBed));
       $("tabUnavailable").setAttribute("aria-selected", String(isUnavail));
       $("tabLengths").setAttribute("aria-selected", String(isLengths));
+      $("tabSynteny").setAttribute("aria-selected", String(isSynteny));
       $("panelTable").classList.toggle("active", isTable);
       $("panelBed").classList.toggle("active", isBed);
       $("panelUnavailable").classList.toggle("active", isUnavail);
       $("panelLengths").classList.toggle("active", isLengths);
+      $("panelSynteny").classList.toggle("active", isSynteny);
       if (isLengths) renderLengthsView(getFilteredRows());
     }
 
@@ -477,6 +599,7 @@ if "/" not in sys.path:
     $("tabBed").addEventListener("click", () => setActiveTab("bed"));
     $("tabUnavailable").addEventListener("click", () => setActiveTab("unavailable"));
     $("tabLengths").addEventListener("click", () => setActiveTab("lengths"));
+    $("tabSynteny").addEventListener("click", () => setActiveTab("synteny"));
 
     function renderIntervalsTable(rows) {
       const body = $("bedTableBody");
@@ -993,6 +1116,8 @@ await app.warm_index(${seqIdx})
       status("Querying…", `HTTP Range reads to S3 (query ${secs(q0)})`);
       $("out").value = "";
       $("bounds").textContent = "";
+      showPlotButton(false);
+      clearSyntenyPlot();
       lastRows = null;
       renderIntervalsTable([]);
       renderUnavailableTable([]);
@@ -1024,17 +1149,60 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
         }
         $("bounds").textContent = b.join(" | ");
         status("Done.", `query ${secs(q0)}${mumSliceSummary ? ` | ${mumSliceSummary}` : ""}`);
+        showPlotButton(true);
+        clearSyntenyPlot();
         setActiveTab("table");
       } catch (err) {
         const msg = err?.message ?? String(err);
         status("Error", msg);
         $("out").value = msg;
+        showPlotButton(false);
+        clearSyntenyPlot();
         renderIntervalsTable([]);
         renderUnavailableTable([]);
         lastRows = null;
         lastMeta = null;
         lastUnavailable = null;
         renderLengthsView([]);
+      }
+    });
+
+    $("plotBtn").addEventListener("click", async () => {
+      const q0 = performance.now();
+      const btn = $("plotBtn");
+      btn.disabled = true;
+      setActiveTab("synteny");
+      setPlotLoading(true, "Loading matplotlib…");
+      status("Plotting…", "loading matplotlib if needed");
+      try {
+        await ensureMpl();
+        setPlotLoading(true, "Rendering synteny plot…");
+        status("Plotting…", `matplotlib ready (${secs(q0)})`);
+        const seqs = getSelectedSeqIndices();
+        const plotJson = String(
+          await pyodide.runPythonAsync(`
+import app
+app.plot_extract_png(${JSON.stringify(seqs)})
+          `)
+        );
+        const plotResult = JSON.parse(plotJson);
+        if (plotResult.error) {
+          setPlotLoading(false);
+          status("Plot error", plotResult.error);
+          return;
+        }
+        setPlotLoading(false);
+        $("syntenyImg").src = "data:image/png;base64," + plotResult.png_b64;
+        $("syntenyImg").classList.add("visible");
+        $("syntenyHint").textContent =
+          `Extract synteny: ${plotResult.n_mums} MUMs across ${plotResult.n_rows} assemblies.`;
+        $("syntenyHint").hidden = false;
+        status("Plot done.", `render ${secs(q0)}`);
+      } catch (err) {
+        setPlotLoading(false);
+        status("Plot error", err?.message ?? String(err));
+      } finally {
+        btn.disabled = false;
       }
     });
 

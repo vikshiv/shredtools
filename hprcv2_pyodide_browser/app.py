@@ -1,4 +1,5 @@
 # HPRCv2 region browser — same data path as mod_scripts/index_extract.py (no CLI, no files out).
+import base64
 import json
 import re
 from bisect import bisect_right
@@ -45,6 +46,9 @@ ACTIVE_PANGENOME = "hprcv2_enhanced"
 _LENGTHS_BUNDLE: dict | None = None
 # Index cache: "pangenome_key:seq_idx" → parsed multi-index document.
 _INDEX_BY_SEQ: dict = {}
+
+# Last successful extract (for synteny plot without re-fetching S3).
+_LAST_EXTRACT: dict | None = None
 
 
 def load_lengths_bundle_path(path: str) -> None:
@@ -297,6 +301,89 @@ def describe_ui() -> str:
     return json.dumps({"n_seqs": n, "genomes": genomes})
 
 
+def _genome_labels() -> list[str]:
+    seq_lengths_multi, contig_names, n = _get_lengths_meta()
+    del seq_lengths_multi
+    labels = []
+    for i in range(n):
+        cnames = contig_names[i]
+        labels.append(cnames[0] if cnames else f"seq_{i}")
+    return labels
+
+
+def _seq_lengths_totals() -> list[int]:
+    seq_lengths_multi, _cn, _n = _get_lengths_meta()
+    return [sum(x) for x in seq_lengths_multi]
+
+
+def plot_extract_png(seq_indices: list[int]) -> str:
+    """
+    Render extract synteny for the last ``run_with_bounds`` result.
+    Returns JSON: ``{png_b64, n_mums, n_rows}`` or ``{error}``.
+    Matplotlib must already be loaded in Pyodide (``loadPackage`` from JS).
+    """
+    global _LAST_EXTRACT
+    if _LAST_EXTRACT is None:
+        return json.dumps({"error": "No extract cached. Run a query first."})
+
+    ctx = _LAST_EXTRACT
+    seq_idx = int(ctx["seq_idx"])
+    coords = ctx["coords"]
+    mums = ctx["mums"]
+    mum_bounds = ctx["mum_bounds"]
+    other_coords = ctx["other_coords"]
+    num_seqs = len(other_coords)
+
+    if not seq_indices:
+        return json.dumps({"error": "No sequences selected for plot."})
+
+    seen = set()
+    plot_seqs = []
+    for s in seq_indices:
+        si = int(s)
+        if si < 0 or si >= num_seqs or si in seen:
+            continue
+        seen.add(si)
+        plot_seqs.append(si)
+    if seq_idx not in seen:
+        plot_seqs.insert(0, seq_idx)
+        seen.add(seq_idx)
+    if not plot_seqs:
+        return json.dumps({"error": "No valid sequence indices for plot."})
+
+    labels_all = _genome_labels()
+    genome_labels = [labels_all[s] for s in plot_seqs]
+    seq_lengths = _seq_lengths_totals()
+
+    try:
+        import synteny_plot
+    except ImportError as e:
+        return json.dumps({"error": f"Plot module not available: {e}"})
+
+    try:
+        png = synteny_plot.plot_extract(
+            coords,
+            mums,
+            mum_bounds,
+            other_coords,
+            seq_idx,
+            plot_seqs,
+            seq_lengths,
+            genome_labels=genome_labels,
+        )
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    n_mums = int(mum_bounds[1]) - int(mum_bounds[0]) + 1
+    return json.dumps(
+        {
+            "png_b64": base64.b64encode(png).decode("ascii"),
+            "n_mums": n_mums,
+            "n_rows": len(plot_seqs),
+        }
+    )
+
+
 async def run(
     seq_idx: int,
     range_str: str,
@@ -339,6 +426,9 @@ async def run_with_bounds(
     Like `run`, but returns JSON: { bed: str, bounds: { contig, start, end } }.
     Bounds are the extracted interval for the selected genome (seq_idx), in contig-local coords.
     """
+    global _LAST_EXTRACT
+    _LAST_EXTRACT = None
+
     seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta()
     if not (0 <= seq_idx < num_seqs):
         raise ValueError(f"seq_idx {seq_idx} invalid (N = {num_seqs})")
@@ -359,7 +449,15 @@ async def run_with_bounds(
     mums_sliced = int(sum(int(b) - int(a) for a, b in ranges))
 
     mums, right_key = got
-    _mum_bounds, other_coords = find_target_region(mums, coords, seq_idx, sequences, right_key=right_key)
+    mum_bounds, other_coords = find_target_region(mums, coords, seq_idx, sequences, right_key=right_key)
+    _LAST_EXTRACT = {
+        "seq_idx": int(seq_idx),
+        "coords": coords,
+        "mums": mums,
+        "mum_bounds": mum_bounds,
+        "other_coords": other_coords,
+        "sequences": sequences,
+    }
     rows = []
     unavailable = []
     _span_re = re.compile(r"start and end coords are in different contigs:\s+(.+?)\s+and\s+(.+)$")

@@ -160,6 +160,44 @@ class MUMdata:
             return _MUMRow(length=int(self.lengths[i]), starts=starts, strands=strands)
         raise TypeError("Only integer row indexing is supported in this minimal MUMdata.")
 
+    def __iter__(self):
+        for i in range(self.num_mums):
+            row = self[i]
+            yield row.length, row.starts, row.strands
+
+    def slice_rows(self, i0: int, i1: int, seq_cols: list[int]) -> "MUMdata":
+        """
+        Copy rows ``i0`` through ``i1`` inclusive, keeping only columns ``seq_cols``.
+        Column ``k`` in the result maps to source column ``seq_cols[k]``.
+        """
+        i0, i1 = int(i0), int(i1)
+        if i0 > i1:
+            raise ValueError(f"slice_rows: i0 ({i0}) > i1 ({i1})")
+        seq_cols = [int(c) for c in seq_cols]
+        n_out = len(seq_cols)
+        n_rows = i1 - i0 + 1
+        out_lengths = array("I")
+        out_starts = array("q")
+        out_strands = bytearray()
+        src_ns = self.n_seqs
+        for i in range(i0, i1 + 1):
+            out_lengths.append(int(self.lengths[i]))
+            s0 = i * src_ns
+            for j in seq_cols:
+                out_starts.append(int(self.starts[s0 + j]))
+                out_strands.append(1 if self.strands[s0 + j] else 0)
+        return MUMdata(n_out, out_lengths, out_starts, out_strands)
+
+    def offset_starts_col(self, col: int, delta: int) -> None:
+        """Subtract ``delta`` from start coordinate in column ``col`` for every row."""
+        ns = self.n_seqs
+        c = int(col)
+        for i in range(self.num_mums):
+            idx = i * ns + c
+            x = int(self.starts[idx])
+            if x != -1:
+                self.starts[idx] = x - int(delta)
+
 _U64 = struct.Struct("<Q")
 _HEADER_MAGIC = b"bumblbi"
 _HEADER_SIZE = 4
