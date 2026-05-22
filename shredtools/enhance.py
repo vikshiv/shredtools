@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 
 import argparse
-import sys, os
-import subprocess
+import sys
+import os
+
 import numpy as np
+import pysam
+from pysam import samtools as pysam_samtools
 from multiprocessing import Pool
-from collections import defaultdict
 
 import mumemto.utils as mutils
 from tqdm.auto import tqdm
 
 from mumemto import mum as run_mumemto
+from shredtools import utils as sutils
 
-_seq_paths = None
-_slices_by_seq = None
-_gap_seqs = None
-_output_dir = None
+_CTX: dict = {}
+
 
 def parse_arguments(args=None):
     parser = argparse.ArgumentParser(
@@ -32,7 +33,7 @@ def parse_arguments(args=None):
         "-o",
         type=str,
         default="output",
-        help="Output directory.",
+        help="Output file (.mums or .bumbl).",
     )
     parser.add_argument(
         "--sequences",
@@ -47,13 +48,13 @@ def parse_arguments(args=None):
         "-t",
         type=int,
         default=1,
-        help="Number of threads to use.",
+        help="Number of parallel workers (one gap per task).",
     )
     parser.add_argument(
         "--lengths",
         "-l",
         dest="lens",
-        help="Lengths file. Default: <mum_file>.lengths",
+        help="Multilengths file. Default: <mum_file>.lengths",
     )
     parser.add_argument(
         "--outlier-factor",
@@ -61,6 +62,13 @@ def parse_arguments(args=None):
         type=float,
         default=None,
         help="Outlier threshold factor for too-small gaps: mark if gap < (median - factor*MAD). Default: 5.",
+    )
+    parser.add_argument(
+        "--min-match-len",
+        dest="min_match_len",
+        type=int,
+        default=10,
+        help="Minimum MUM length for gap-local mumemto (default: 10).",
     )
 
     args = parser.parse_args(args)
@@ -78,8 +86,8 @@ def parse_arguments(args=None):
             )
             sys.exit(1)
 
-    if not args.output.endswith('.mums') and not args.output.endswith('.bumbl'):
-        args.output += '.mums'
+    if not args.output.endswith(".mums") and not args.output.endswith(".bumbl"):
+        args.output += ".mums"
 
     if args.threads < 1:
         print("--threads must be >= 1", file=sys.stderr)
@@ -89,21 +97,60 @@ def parse_arguments(args=None):
         print("--outlier-factor must be >= 0", file=sys.stderr)
         sys.exit(1)
 
+    if args.min_match_len < 1:
+        print("--min-match-len must be >= 1", file=sys.stderr)
+        sys.exit(1)
+
     return args
 
 
-def _subset_sequences(args, mums, seq_lengths, seq_paths):
-    NUM_SEQS = len(seq_lengths)
-    if args.sequences is not None and any([s >= NUM_SEQS or s < 0 for s in args.sequences]):
-        print(f"Invalid sequence index in {args.sequences} (N = {NUM_SEQS})", file=sys.stderr)
+def _load_lengths_layout(lengths_path):
+    seq_paths = mutils.get_seq_paths(lengths_path)
+    seq_lengths_multi = mutils.get_sequence_lengths(lengths_path, multilengths=True)
+    contig_names = mutils.get_contig_names(lengths_path)
+    total_lens = [sum(int(x) for x in row) for row in seq_lengths_multi]
+    return seq_lengths_multi, contig_names, total_lens, seq_paths
+
+
+def ensure_fai_indexes(seq_paths):
+    seen = set()
+    for path in seq_paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        if not os.path.isfile(path):
+            print(f"FASTA not found: {path}", file=sys.stderr)
+            raise SystemExit(1)
+        fai = path + ".fai"
+        if not os.path.isfile(fai) or os.path.getmtime(fai) < os.path.getmtime(path):
+            try:
+                pysam_samtools.faidx(path)
+            except Exception as e:
+                print(f"pysam.samtools.faidx failed for {path}: {e}", file=sys.stderr)
+                raise SystemExit(1) from e
+
+
+def _subset_sequences(
+    args,
+    mums,
+    seq_lengths_multi,
+    contig_names,
+    total_lens,
+    seq_paths,
+):
+    num_seqs = len(total_lens)
+    if args.sequences is not None and any(s >= num_seqs or s < 0 for s in args.sequences):
+        print(f"Invalid sequence index in {args.sequences} (N = {num_seqs})", file=sys.stderr)
         raise SystemExit(1)
     if args.sequences is None:
-        args.sequences = list(range(NUM_SEQS))
-        return mums, seq_lengths, seq_paths
-    seq_lengths = [seq_lengths[i] for i in args.sequences]
+        args.sequences = list(range(num_seqs))
+        return mums, seq_lengths_multi, contig_names, total_lens, seq_paths
+    seq_lengths_multi = [seq_lengths_multi[i] for i in args.sequences]
+    contig_names = [contig_names[i] for i in args.sequences]
+    total_lens = [total_lens[i] for i in args.sequences]
     seq_paths = [seq_paths[i] for i in args.sequences]
     mums = mums[:, args.sequences]
-    return mums, seq_lengths, seq_paths
+    return mums, seq_lengths_multi, contig_names, total_lens, seq_paths
 
 
 def compute_gap_coords_and_lengths(mums):
@@ -114,7 +161,7 @@ def compute_gap_coords_and_lengths(mums):
     if len(gaps) == 0:
         print("No collinear MUM gaps found.", file=sys.stderr)
         raise SystemExit(1)
-    
+
     coords = []
     gap_lengths = []
     for l, r in gaps:
@@ -137,12 +184,6 @@ def compute_gap_coords_and_lengths(mums):
     return gaps, coords, gap_lengths
 
 
-def select_gaps(gap_lengths, min_gap_length):
-    if gap_lengths.size == 0:
-        return []
-    return np.where((gap_lengths >= int(min_gap_length)).any(axis=1))[0].tolist()
-
-
 def compute_outlier_mask(gap_lengths, outlier_factor=5.0):
     """
     Mark genomes that are *too small* for a gap vs per-gap median (med - outlier_factor*MAD).
@@ -157,112 +198,140 @@ def compute_outlier_mask(gap_lengths, outlier_factor=5.0):
     return gap_lengths < (med - float(outlier_factor) * mad)
 
 
-def parse_single_fasta(path):
-    with open(path, "r") as f:
-        return "".join(line.strip() for line in f if not line.startswith(">"))
-
-def filter_gap_slices(coords, gap_ids, outlier_mask, seq_lengths):
-    slices_by_seq = [{} for _ in range(len(seq_lengths))]
+def build_gap_work(gap_ids, coords, outlier_mask, num_seqs):
+    work = []
     for gap_id in gap_ids:
-        c = coords[gap_id]
-        for seq_local_idx in range(c.shape[0]):
-            if outlier_mask is not None and outlier_mask[gap_id, seq_local_idx]:
-                continue
-            start, end = c[seq_local_idx]
-            if end <= start:
-                continue
-            if start < 0 or end < 0:
-                continue
-            if end > seq_lengths[seq_local_idx]:
-                continue
-            slices_by_seq[seq_local_idx][gap_id] = (start, end)
-    return slices_by_seq
-
-def _init_collect_gap_sequences(seq_paths, slices_by_seq):
-    global _seq_paths, _slices_by_seq
-    _seq_paths = seq_paths
-    _slices_by_seq = slices_by_seq
+        row = coords[gap_id]
+        if outlier_mask is None:
+            keep = np.ones(num_seqs, dtype=bool)
+        else:
+            keep = ~outlier_mask[gap_id]
+        work.append((int(gap_id), row, keep))
+    return work
 
 
-def _collect_gap_slices_for_one_seq(seq_local_idx):
-    slices = _slices_by_seq[seq_local_idx]
-    if not slices:
-        return []
-    fasta_path = _seq_paths[seq_local_idx]
-    seq = parse_single_fasta(fasta_path)
-    out = []
-    for gap_id, (start, end) in slices.items():
-        out.append((gap_id, seq_local_idx, start, seq[start:end]))
-    return out
+def _worker_init(
+    seq_paths,
+    seq_lengths_multi,
+    contig_names_per_seq,
+    total_lens_per_seq,
+    min_match_len,
+    num_seqs,
+):
+    global _CTX
+    fastas = [pysam.FastaFile(p) for p in seq_paths]
+    _CTX = {
+        "fastas": fastas,
+        "seq_lengths_multi": [list(x) for x in seq_lengths_multi],
+        "contig_names_per_seq": [list(x) for x in contig_names_per_seq],
+        "total_lens_per_seq": list(total_lens_per_seq),
+        "min_match_len": int(min_match_len),
+        "num_seqs": int(num_seqs),
+    }
 
-def collect_gap_sequences_from_fastas(seq_paths, slices_by_seq, gap_ids, threads):
-    gap_seqs = {gap_id: [None for _ in range(len(seq_paths))] for gap_id in gap_ids}
-    threads = min(int(threads), max(1, len(seq_paths)))
-    with Pool(
-        processes=threads,
-        initializer=_init_collect_gap_sequences,
-        initargs=(seq_paths, slices_by_seq),
-    ) as pool:
-        for items in tqdm(
-            pool.imap_unordered(_collect_gap_slices_for_one_seq, range(len(seq_paths))),
-            total=len(seq_paths),
-            desc="load gap sequences",
-        ):
-            for gap_id, seq_local_idx, start, subseq in items:
-                gap_seqs[gap_id][seq_local_idx] = (start, subseq)
-    return gap_seqs
 
-def enhance_gap(gap_seqs):
-    missing = np.zeros(len(gap_seqs), dtype=bool)
+def _fetch_gap_intervals(coords_row, keep_mask):
+    """Return list length N: None or (global_g0, subseq) per assembly."""
+    ctx = _CTX
+    fastas = ctx["fastas"]
+    total_lens = ctx["total_lens_per_seq"]
+    seq_lengths_multi = ctx["seq_lengths_multi"]
+    contig_names = ctx["contig_names_per_seq"]
+    n = int(ctx["num_seqs"])
+    gap_seq = [None] * n
+    coords_row = np.asarray(coords_row, dtype=np.int64)
+
+    for j in range(n):
+        if not bool(keep_mask[j]):
+            continue
+        g0, g1 = int(coords_row[j, 0]), int(coords_row[j, 1])
+        if g1 <= g0 or g0 < 0 or g1 < 0 or g1 > int(total_lens[j]):
+            continue
+        try:
+            cname, rel = sutils.convert_global_to_local_coords(
+                g0,
+                g1 - 1,
+                contig_names[j],
+                seq_lengths_multi[j],
+            )
+        except AssertionError:
+            continue
+        lo, hi_incl = int(rel[0]), int(rel[1])
+        subseq = fastas[j].fetch(cname, lo, hi_incl + 1)
+        if len(subseq) == 0:
+            continue
+        gap_seq[j] = (g0, subseq)
+    return gap_seq
+
+
+def enhance_gap(gap_seqs, min_match_len):
     input_seqs = []
     present_idx = []
     present_offsets = []
     for i, payload in enumerate(gap_seqs):
         if payload is None:
-            missing[i] = True
             continue
         start, s = payload
         present_idx.append(i)
         present_offsets.append(start)
         input_seqs.append([s])
 
-    out_mums = run_mumemto(input_seqs, min_match_len=10)
-    num_mums = len(out_mums)
     num_seqs_total = len(gap_seqs)
+    if not input_seqs:
+        return mutils.MUMdata.from_arrays(
+            np.zeros(0, dtype=np.uint32),
+            np.zeros((0, num_seqs_total), dtype=np.int64),
+            np.zeros((0, num_seqs_total), dtype=bool),
+        )
+
+    out_mums = run_mumemto(input_seqs, min_match_len=int(min_match_len))
+    num_mums = len(out_mums)
     lengths = np.empty(num_mums, dtype=np.uint32)
     starts = np.full((num_mums, num_seqs_total), -1, dtype=np.int64)
     strands = np.zeros((num_mums, num_seqs_total), dtype=bool)
-    present_offsets = np.asarray(present_offsets, dtype=np.int64)
+    present_offsets_a = np.asarray(present_offsets, dtype=np.int64)
 
     for j in range(num_mums):
         length, offsets, match_strands = out_mums[j]
         lengths[j] = length
-        starts[j, present_idx] = offsets + present_offsets
+        starts[j, present_idx] = offsets + present_offsets_a
         strands[j, present_idx] = match_strands
-        
+
     mums = mutils.MUMdata.from_arrays(lengths, starts, strands)
     mums.sort()
     strict_mums = mums[:, present_idx]
     blocks = mutils.find_coll_blocks(strict_mums)
-    coll_mums = [i for s, e in blocks for i in range(s, e+1)]   
+    coll_mums = [i for s, e in blocks for i in range(s, e + 1)]
     return mums[coll_mums, :]
+
+
+def _worker_one(task):
+    _gap_id, coords_row, keep_mask = task
+    ctx = _CTX
+    payloads = _fetch_gap_intervals(coords_row, keep_mask)
+    return enhance_gap(payloads, ctx["min_match_len"])
+
 
 def main(args=None):
     args = parse_arguments(args)
 
-    seq_lengths = mutils.get_sequence_lengths(args.lens)
-    seq_paths = mutils.get_seq_paths(args.lens)
-    
+    seq_lengths_multi, contig_names, total_lens, seq_paths = _load_lengths_layout(args.lens)
+
     mums = mutils.MUMdata(args.mum_file)
-    
-    mums, seq_lengths, seq_paths = _subset_sequences(args, mums, seq_lengths, seq_paths)
+
+    mums, seq_lengths_multi, contig_names, total_lens, seq_paths = _subset_sequences(
+        args, mums, seq_lengths_multi, contig_names, total_lens, seq_paths
+    )
+
+    num_seqs = len(total_lens)
+    ensure_fai_indexes(seq_paths)
 
     if mums.blocks is None:
         mums.blocks = mutils.find_coll_blocks(mums)
         print(f"found blocks: {len(mums.blocks)}", file=sys.stderr)
     else:
         print(f"using provided blocks: {len(mums.blocks)}", file=sys.stderr)
-    
+
     if len(mums) == 0 or mums.blocks is None or len(mums.blocks) == 0:
         print("No collinear MUMs found.", file=sys.stderr)
         raise SystemExit(1)
@@ -273,21 +342,25 @@ def main(args=None):
     print(f"Total MUM gap count: {len(gaps)}", file=sys.stderr)
     print(f"Gaps to enhance: {len(gap_ids)}", file=sys.stderr)
 
-
     outlier_mask = compute_outlier_mask(gap_lengths, outlier_factor=args.outlier_factor)
-    slices_by_seq = filter_gap_slices(coords, gap_ids, outlier_mask, seq_lengths)
+    work = build_gap_work(gap_ids, coords, outlier_mask, num_seqs)
 
-    gap_seqs = collect_gap_sequences_from_fastas(seq_paths, slices_by_seq, gap_ids, args.threads)
+    initargs = (
+        seq_paths,
+        seq_lengths_multi,
+        contig_names,
+        total_lens,
+        int(args.min_match_len),
+        num_seqs,
+    )
 
-    print(f"loaded gap sequences for {len(gap_seqs)} gaps", file=sys.stderr)
-
-    threads = min(int(args.threads), max(1, len(gap_ids)))
-    with Pool(processes=threads) as pool:
+    threads = min(int(args.threads), max(1, len(work)))
+    with Pool(processes=threads, initializer=_worker_init, initargs=initargs) as pool:
         enhanced_mums = list(
             tqdm(
-                pool.imap_unordered(enhance_gap, (gap_seqs[gap_id] for gap_id in gap_ids)),
-                total=len(gap_ids),
-                desc="Running mumemto on gaps",
+                pool.imap_unordered(_worker_one, work),
+                total=len(work),
+                desc="enhance gaps",
             )
         )
 
@@ -298,11 +371,12 @@ def main(args=None):
         combined = combined + em
 
     combined.sort(ref_col=0, copy=False)
-    if args.output.endswith('.bumbl'):
+    if args.output.endswith(".bumbl"):
         combined.write_bumbl(args.output)
-    elif args.output.endswith('.mums'):
+    elif args.output.endswith(".mums"):
         combined.write_mums(args.output)
     print(f"wrote enhanced MUMs to {args.output}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()
