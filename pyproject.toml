@@ -14,6 +14,9 @@ dependencies = [
     "tqdm",
 ]
 
+[project.scripts]
+shredtools = "shredtools.cli:main"
+
 [tool.setuptools]
 packages = ["shredtools"]
 
