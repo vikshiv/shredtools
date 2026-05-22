@@ -278,11 +278,7 @@ def enhance_gap(gap_seqs, min_match_len):
 
     num_seqs_total = len(gap_seqs)
     if not input_seqs:
-        return mutils.MUMdata.from_arrays(
-            np.zeros(0, dtype=np.uint32),
-            np.zeros((0, num_seqs_total), dtype=np.int64),
-            np.zeros((0, num_seqs_total), dtype=bool),
-        )
+        return None
 
     out_mums = run_mumemto(input_seqs, min_match_len=int(min_match_len))
     num_mums = len(out_mums)
