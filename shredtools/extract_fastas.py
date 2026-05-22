@@ -5,8 +5,11 @@ Input is tab-separated BED (4 columns): contig, start, end, path/to/reference.fa
 Coordinates are 0-based start and exclusive end (standard BED).
 
 Without ``--agc``, each row is extracted with ``pysam`` (requires ``.fai`` next to each
-reference FASTA). With ``--agc``, all regions are fetched in one ``agc getctg`` call and
-optionally split into per-row FASTAs (see ``--no-split``).
+reference FASTA). With ``--agc``, all regions are fetched in one ``agc getctg`` call.
+
+By default, each BED row becomes its own ``*_extract*.fa`` file. With ``--multi-fasta``,
+output is a single ``combined_extract.fa`` (AGC: keep ``getctg`` output; pysam: merge
+records in BED order).
 """
 
 from __future__ import annotations
@@ -22,6 +25,8 @@ from typing import NamedTuple, Sequence
 
 import pysam
 from tqdm.auto import tqdm
+
+COMBINED_FASTA_NAME = "combined_extract.fa"
 
 
 class RegionLine(NamedTuple):
@@ -246,6 +251,53 @@ def run_pysam_extract(
         raise SystemExit(1)
 
 
+def run_pysam_extract_multifasta(
+    rows: list[RegionLine],
+    out_dir: str,
+    verbose: bool,
+) -> None:
+    fai_errors = validate_fai_paths(rows)
+    if fai_errors:
+        print("File errors:", file=sys.stderr)
+        for msg in fai_errors:
+            print(f"  {msg}", file=sys.stderr)
+        raise SystemExit(1)
+
+    combined_path = os.path.join(out_dir, COMBINED_FASTA_NAME)
+    handles: dict[str, pysam.FastaFile] = {}
+    failures: list[tuple[str, str]] = []
+
+    try:
+        row_iter: Sequence[RegionLine] = rows
+        if verbose:
+            row_iter = tqdm(rows, desc="extract", unit="region")
+
+        with open(combined_path, "w", encoding="utf-8") as out:
+            for row in row_iter:
+                try:
+                    if row.start < 0 or row.end <= row.start:
+                        raise ValueError(
+                            f"invalid BED interval: {row.contig}:{row.start}-{row.end}"
+                        )
+                    if row.fasta not in handles:
+                        handles[row.fasta] = pysam.FastaFile(row.fasta)
+                    seq = handles[row.fasta].fetch(row.contig, row.start, row.end)
+                    out.write(f"{fasta_header(row.contig, row.start, row.end)}\n{seq}\n")
+                except (OSError, ValueError, KeyError) as e:
+                    failures.append(
+                        (row.fasta, f"{row.contig}:{row.start}-{row.end}: {e}")
+                    )
+    finally:
+        for ff in handles.values():
+            ff.close()
+
+    if failures:
+        print("\nErrors:", file=sys.stderr)
+        for target, msg in failures:
+            print(f"  {target}: {msg}", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def run_agc_extract(
     rows: list[RegionLine],
     out_dir: str,
@@ -253,7 +305,7 @@ def run_agc_extract(
     archive: str,
     agc: str,
     threads: int,
-    no_split: bool,
+    multi_fasta: bool,
 ) -> None:
     try:
         agc_contigs = list_agc_contigs(agc, archive)
@@ -277,8 +329,7 @@ def run_agc_extract(
             print(f"invalid region {r.contig}:{r.start}-{r.end}: {e}", file=sys.stderr)
             raise SystemExit(1) from e
 
-    combined_name = "combined_extract.fa"
-    combined_path = os.path.join(out_dir, combined_name)
+    combined_path = os.path.join(out_dir, COMBINED_FASTA_NAME)
     cmd = [agc, "getctg", "-t", str(threads), "-o", combined_path, archive, *regions]
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
@@ -287,7 +338,7 @@ def run_agc_extract(
         print(f"{' '.join(cmd[:6])} ... failed: {err.strip()}", file=sys.stderr)
         raise SystemExit(1) from e
 
-    if not no_split:
+    if not multi_fasta:
         split_multifasta(combined_path, out_names, out_dir)
         os.remove(combined_path)
 
@@ -300,7 +351,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--out-dir",
         dest="out_dir",
         required=True,
-        help="Output directory; one *_extract*.fa per BED row (unless --no-split with --agc)",
+        help="Output directory; one *_extract*.fa per BED row (or combined_extract.fa with --multi-fasta)",
     )
     p.add_argument("--agc", metavar="PATH", help="AGC archive; extract via agc getctg instead of pysam")
     p.add_argument(
@@ -311,32 +362,31 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Threads: agc getctg -t, or parallel reference FASTAs via pysam (default: CPU count)",
     )
     p.add_argument(
-        "--no-split",
+        "--multi-fasta",
         action="store_true",
-        help="With --agc: keep single combined FASTA instead of splitting per BED row",
+        help="Write one multi-record FASTA (combined_extract.fa) instead of one file per BED row",
     )
     p.add_argument("--agc-bin", default="agc", help="agc executable (default: agc)")
     p.add_argument("-v", "--verbose", action="store_true", help="Show a tqdm progress bar on stderr")
     args = p.parse_args(list(argv) if argv is not None else None)
 
-    if args.no_split and not args.agc:
-        print("--no-split requires --agc", file=sys.stderr)
-        raise SystemExit(1)
-
     rows = parse_bed_file(args.bed_file)
     out_dir = os.path.abspath(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
-    out_names = assign_output_filenames(rows)
     threads = max(1, args.threads)
 
     if args.agc:
         if not os.path.isfile(args.agc):
             print(f"AGC archive not found: {args.agc}", file=sys.stderr)
             raise SystemExit(1)
+        out_names = [] if args.multi_fasta else assign_output_filenames(rows)
         run_agc_extract(
-            rows, out_dir, out_names, args.agc, args.agc_bin, threads, args.no_split
+            rows, out_dir, out_names, args.agc, args.agc_bin, threads, args.multi_fasta
         )
+    elif args.multi_fasta:
+        run_pysam_extract_multifasta(rows, out_dir, args.verbose)
     else:
+        out_names = assign_output_filenames(rows)
         run_pysam_extract(rows, out_dir, out_names, threads, args.verbose)
 
 
