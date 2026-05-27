@@ -17,6 +17,8 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "stats": ("shredtools.stats", "main"),
 }
 
+__version__ = "0.1.0"
+
 _COMMAND_HELP = "\n".join(f"  {name:8}  {mod.rsplit('.', 1)[-1]}" for name, (mod, _) in sorted(COMMANDS.items()))
 
 
@@ -29,6 +31,8 @@ def _print_top_level_help() -> None:
     print(_COMMAND_HELP)
     print()
     print("Run `shredtools <command> -h` for command-specific help.")
+    print()
+    print("Version:", __version__)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -37,6 +41,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if not argv or argv[0] in ("-h", "--help"):
         _print_top_level_help()
+        return
+
+    if argv[0] in ("--version", "-V", "version"):
+        print(f"shredtools version {__version__}")
         return
 
     cmd = argv[0]
