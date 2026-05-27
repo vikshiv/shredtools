@@ -14,6 +14,7 @@ import urllib.request
 import numpy as np
 import mumemto.utils as utils 
 
+_U16 = struct.Struct("<H")
 _U64 = struct.Struct("<Q")
 _U64x2 = struct.Struct("<QQ")
 
@@ -112,7 +113,54 @@ def checksum_from_bumbl(bumbl_path):
         sample_n = min(_CHECKSUM_SAMPLE_SIZE, n_mums)
         lengths32 = np.fromfile(fin, dtype=np.uint32, count=sample_n)
     return n_seqs, bumbl_lengths_checksum(lengths32.astype(np.uint64, copy=False))
-    
+
+
+@dataclass(frozen=True)
+class MumHeaderInfo:
+    path: str
+    flags: dict
+    n_seqs: int
+    n_mums: int
+    blocks_stored: bool
+    num_blocks: int | None
+
+
+def read_mum_header(path: str) -> MumHeaderInfo:
+    """
+    Read header and optional embedded collinear block count from a ``.bumbl`` / ``.mums`` file.
+
+    Does not load MUM arrays; only parses the on-disk layout used by ``mumemto.utils.MUMdata.parse_bums``.
+    """
+    with open(path, "rb") as fin:
+        flags_raw = _U16.unpack(fin.read(2))[0]
+        flags = utils.unpack_flags(np.uint16(flags_raw))
+        n_seqs = _U64.unpack(fin.read(8))[0]
+        n_mums = _U64.unpack(fin.read(8))[0]
+
+        length_size = 4 if flags.get("length32", True) else 2
+        start_size = 8
+        lengths_pos = 2 + 8 + 8
+        offsets_pos = lengths_pos + n_mums * length_size
+        strands_pos = offsets_pos + n_mums * n_seqs * start_size
+        strands_nbytes = int(np.ceil(n_seqs * n_mums / 8))
+        blocks_pos = strands_pos + strands_nbytes
+
+        blocks_stored = bool(flags.get("coll_blocks", False))
+        num_blocks = None
+        if blocks_stored:
+            fin.seek(blocks_pos)
+            num_blocks = _U64.unpack(fin.read(8))[0]
+
+    return MumHeaderInfo(
+        path=os.path.abspath(path),
+        flags=flags,
+        n_seqs=n_seqs,
+        n_mums=n_mums,
+        blocks_stored=blocks_stored,
+        num_blocks=num_blocks,
+    )
+
+
 def verify_bumbl_sorted_column(bumbl_path, seq_idx, chunk_rows=65536):
     """
     Stream-check that ``starts[:, seq_idx]`` is non-decreasing (sorted for interval queries).

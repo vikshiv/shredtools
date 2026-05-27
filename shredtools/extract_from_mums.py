@@ -19,9 +19,8 @@ def parse_arguments(args=None):
     parser.add_argument("--range", '-r', type=str, help="region coordinates. Format -> chr:start-end", required=True)
     parser.add_argument("--plot", action="store_true", help="If set, generate a visualization of the extracted region using MUMs from MUM file.")
     parser.add_argument("--plot-full", action="store_true", help="If set, generate a visualization of the extracted region using all MUMs from MUM file.")
-    parser.add_argument("--fasta", action="store_true", help="If set, generate a FASTA file for each sequence that contains the target sequence. Otherwise, only write a BED file of coordinates.")
-    parser.add_argument("--output", '-o', type=str, default=None, help="Output prefix for shreds. With --fasta, specifies directory to store shred sequences")
-    parser.add_argument("--sequences", '-x', type=int, nargs='*', default=None, help="One or more sequence indices to output BED or FASTA for. By default, all sequences are included.")
+    parser.add_argument("--output", '-o', type=str, default=None, help="Output prefix for .bed and plot PDFs (BED to stdout if omitted)")
+    parser.add_argument("--sequences", '-x', type=int, nargs='*', default=None, help="One or more sequence indices to output BED for. By default, all sequences are included.")
     parser.add_argument('--lengths','-l', dest='lens', help='lengths file, first column is seq length in order of filelist')
     parser.add_argument('--bumblbi','-b', dest='bi', help='Path or URL to bumbl index (default: <mum_file>.bi)')
     
@@ -52,8 +51,8 @@ def parse_arguments(args=None):
             print(f"Lengths file {args.lens} not found, and no lengths file provided", file=sys.stderr)
             raise SystemExit(1)
         
-    if args.output is None and (args.fasta or args.plot_full or args.plot):
-        print('Output prefix required for plotting or fasta output.', file=sys.stderr)
+    if args.output is None and (args.plot_full or args.plot):
+        print('Output prefix required for plotting.', file=sys.stderr)
         raise SystemExit(1)
     return args
 
@@ -163,27 +162,6 @@ def safe_convert_global_to_local_coords(
 
 
 
-def extract_fasta(output_prefix, lengths_file, contig_names, seq_lengths_multi, other_coords, sequences):
-    paths = mutils.get_seq_paths(lengths_file)
-    for i in range(len(sequences)):
-        p = paths[i]
-        with open(p, 'r') as f:
-            seq = ''.join(line.strip() for line in f if not line.startswith('>'))
-            converted = safe_convert_global_to_local_coords(
-                other_coords[i][0],
-                other_coords[i][1],
-                contig_names[i],
-                seq_lengths_multi[i],
-                on_fail_prefix="FASTA",
-                path_for_msg=p,
-            )
-            if converted is None:
-                continue
-            name, rel_offsets = converted
-            coord_line = f"{name}:{rel_offsets[0]}-{rel_offsets[1]}"
-            with open(os.path.join(output_prefix, os.path.basename(p).replace('.fa', f'.extract.fa')), 'w') as out:
-                out.write(f'>{os.path.splitext(os.path.basename(p))[0]}_{coord_line}\n{seq[other_coords[i][0] : other_coords[i][1]]}\n')
-
 def extract_bed(output_prefix, lengths_file, contig_names, seq_lengths_multi, other_coords, sequences):
     paths = mutils.get_seq_paths(lengths_file)
     if output_prefix is None:
@@ -279,8 +257,6 @@ def plot_full_synteny(args, coords, mums, mum_bounds, other_coords, seq_idx, seq
 
 def main(args=None):
     args = parse_arguments(args)
-    if args.fasta and not os.path.exists(args.output):
-        os.makedirs(args.output)
     seq_lengths_multi = mutils.get_sequence_lengths(args.lens, multilengths=True)
     seq_lengths = [sum(x) for x in seq_lengths_multi]
     contig_names = mutils.get_contig_names(args.lens)
@@ -310,10 +286,7 @@ def main(args=None):
         plot_extract(args, coords, mums, mum_bounds, other_coords, args.seq_idx, args.sequences, seq_lengths)
     if args.plot_full:
         plot_full_synteny(args, coords, mums, mum_bounds, other_coords, args.seq_idx, args.sequences, seq_lengths)
-    if args.fasta:
-        extract_fasta(args.output, args.lens, contig_names, seq_lengths_multi, other_coords, args.sequences)
-    else:
-        extract_bed(args.output, args.lens, contig_names, seq_lengths_multi, other_coords, args.sequences)
+    extract_bed(args.output, args.lens, contig_names, seq_lengths_multi, other_coords, args.sequences)
     
 
 if __name__ == "__main__":
