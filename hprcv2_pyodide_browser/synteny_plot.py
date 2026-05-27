@@ -7,8 +7,33 @@ from typing import Sequence
 
 import viz_mums
 
+_DARK_BG = "#1a1a1a"
+_DARK_FG = "#b0b0b0"
+_DARK_BASELINE = "#666666"
 
-def plot(genome_lengths, polygons, colors, centering, xlims=None, size=None, genomes=None):
+
+def _apply_dark_theme(fig, ax) -> None:
+    fig.patch.set_facecolor(_DARK_BG)
+    ax.set_facecolor(_DARK_BG)
+    ax.tick_params(colors=_DARK_FG, which="both")
+    ax.xaxis.label.set_color(_DARK_FG)
+    ax.yaxis.label.set_color(_DARK_FG)
+    for spine in ax.spines.values():
+        spine.set_color(_DARK_FG)
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_color(_DARK_FG)
+
+
+def plot(
+    genome_lengths,
+    polygons,
+    colors,
+    centering,
+    xlims=None,
+    size=None,
+    genomes=None,
+    dark: bool = False,
+):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -16,6 +41,7 @@ def plot(genome_lengths, polygons, colors, centering, xlims=None, size=None, gen
     from matplotlib import pyplot as plt
 
     fig, ax = plt.subplots()
+    baseline_color = _DARK_BASELINE if dark else "black"
     max_length = max(genome_lengths)
     for idx, g in enumerate(genome_lengths):
         ax.plot(
@@ -23,7 +49,7 @@ def plot(genome_lengths, polygons, colors, centering, xlims=None, size=None, gen
             [idx, idx],
             alpha=0.2,
             linewidth=0.75,
-            c="black",
+            c=baseline_color,
         )
 
     if xlims is not None:
@@ -51,6 +77,8 @@ def plot(genome_lengths, polygons, colors, centering, xlims=None, size=None, gen
     ax.set_ylabel("sequences")
     ax.set_ylim(-0.25, len(genome_lengths) - 1 + 0.25)
     ax.invert_yaxis()
+    if dark:
+        _apply_dark_theme(fig, ax)
     fig.set_tight_layout(True)
     if size:
         fig.set_size_inches(*size)
@@ -66,6 +94,7 @@ def plot_extract(
     sequences: Sequence[int],
     seq_lengths: Sequence[int],
     genome_labels: Sequence[str] | None = None,
+    dark: bool = False,
 ) -> bytes:
     """
     Render extract synteny to PNG bytes (window-relative coordinates).
@@ -100,6 +129,7 @@ def plot_extract(
         xlims=(0, x_max),
         size=(10, height),
         genomes=labels,
+        dark=dark,
     )
     ax.plot(
         [start, start],
@@ -117,7 +147,10 @@ def plot_extract(
     )
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+    save_kw = {"format": "png", "dpi": 120, "bbox_inches": "tight"}
+    if dark:
+        save_kw["facecolor"] = _DARK_BG
+    fig.savefig(buf, **save_kw)
     from matplotlib import pyplot as plt
 
     plt.close(fig)

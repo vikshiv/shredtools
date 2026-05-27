@@ -319,7 +319,7 @@ def _seq_lengths_totals() -> list[int]:
     return [sum(x) for x in seq_lengths_multi]
 
 
-def plot_extract_png(seq_indices: list[int]) -> str:
+def plot_extract_png(seq_indices: list[int], dark: bool = False) -> str:
     """
     Render extract synteny for the last ``run_with_bounds`` result.
     Returns JSON: ``{png_b64, n_mums, n_rows}`` or ``{error}``.
@@ -373,6 +373,7 @@ def plot_extract_png(seq_indices: list[int]) -> str:
             plot_seqs,
             seq_lengths,
             genome_labels=genome_labels,
+            dark=bool(dark),
         )
     except Exception as e:
         return json.dumps({"error": str(e)})
