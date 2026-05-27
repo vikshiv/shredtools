@@ -170,7 +170,7 @@
 
   <div class="row">
     <label for="region">Region</label>
-    <input id="region" type="text" placeholder="CONTIG:start-end_excl (end = one past last base)" disabled style="flex: 1 1 20rem; min-width: 20rem;" />
+    <input id="region" type="text" placeholder="CONTIG:start-end" disabled style="flex: 1 1 20rem; min-width: 20rem;" />
   </div>
 
   <div class="row">
@@ -634,7 +634,7 @@ if "/" not in sys.path:
         tdE.textContent = String(r?.end ?? "");
         const tdL = document.createElement("td");
         tdL.className = "mono";
-        tdL.textContent = String(regionLength(r));
+        tdL.textContent = fmtBp(regionLength(r));
         tr.appendChild(tdG);
         tr.appendChild(tdC);
         tr.appendChild(tdS);
