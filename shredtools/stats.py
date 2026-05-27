@@ -37,25 +37,19 @@ def _format_from_path(path: str) -> str:
     return ext.lstrip(".") or "unknown"
 
 
-def _probe_sidecars(mum_file: str) -> dict[str, dict]:
+def _probe_sidecars(mum_file: str) -> dict[str, str]:
     prefix = os.path.splitext(mum_file)[0]
     candidates = {
         "lengths": f"{prefix}.lengths",
         "athresh": f"{prefix}.athresh",
         "thresh": f"{prefix}.thresh",
-        "filelist": f"{prefix}.filelist",
-        "bumbl_index": f"{mum_file}.bi",
-        "sorted_bumbl": f"{prefix}.sorted.bumbl",
-        "coll_bumbl": f"{prefix}.coll.bumbl",
-        "enhanced_bumbl": f"{prefix}.enhanced.bumbl",
+        "bumbl.bi": f"{mum_file}.bi",
     }
-    out = {}
-    for name, path in candidates.items():
-        out[name] = {
-            "path": os.path.abspath(path),
-            "present": os.path.exists(path),
-        }
-    return out
+    return {
+        name: os.path.abspath(path)
+        for name, path in candidates.items()
+        if os.path.exists(path)
+    }
 
 
 def _build_report(mum_file: str, header: MumHeaderInfo) -> dict:
@@ -80,10 +74,10 @@ def _print_human(report: dict) -> None:
     print(f"collinear_blocks_stored: {blocks}")
     if report["collinear_blocks_stored"]:
         print(f"num_collinear_blocks: {report['num_collinear_blocks']}")
-    print("associated_files:")
-    for name, info in report["associated_files"].items():
-        status = "present" if info["present"] else "missing"
-        print(f"  {name}: {info['path']} ({status})")
+    if report["associated_files"]:
+        print("associated_files:")
+        for name, path in report["associated_files"].items():
+            print(f"  {name}: {path}")
 
 
 def main(args=None):
