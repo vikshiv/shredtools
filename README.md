@@ -6,6 +6,8 @@ Shredtools is a toolkit for querying a pangenome using multi-MUMs computed by [M
 
 Shredtools expects a set of multi-MUMs in a `.bumbl` file (use `mumemto -b` or `mumemto convert`) and a corresponding `.lengths`. See [Mumemto](https://github.com/vikshiv/mumemto) for details on file formats.
 
+**Browser:** try the `shredtools` extract web app at https://vikshiv.github.io/shredtools/
+
 ---
 
 ## Installation
