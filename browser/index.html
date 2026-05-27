@@ -463,22 +463,11 @@
     status("Loading app code…", `fetching local scripts (elapsed ${secs()})`);
     const uRes = await fetch(new URL("bumbl_index_utils.py", base));
     const aRes = await fetch(new URL("app.py", base));
-    const vRes = await fetch(new URL("viz_mums.py", base));
-    const sRes = await fetch(new URL("synteny_plot.py", base));
     if (!uRes.ok) throw new Error("Could not load bumbl_index_utils.py (serve this folder over HTTP, not file://).");
     if (!aRes.ok) throw new Error("Could not load app.py.");
-    if (!vRes.ok) throw new Error("Could not load viz_mums.py.");
-    if (!sRes.ok) throw new Error("Could not load synteny_plot.py.");
-    const [uText, aText, vText, sText] = [
-      await uRes.text(),
-      await aRes.text(),
-      await vRes.text(),
-      await sRes.text(),
-    ];
+    const [uText, aText] = [await uRes.text(), await aRes.text()];
     pyodide.FS.writeFile("/bumbl_index_utils.py", uText);
     pyodide.FS.writeFile("/app.py", aText);
-    pyodide.FS.writeFile("/viz_mums.py", vText);
-    pyodide.FS.writeFile("/synteny_plot.py", sText);
     status("Initializing Python…", `importing app (elapsed ${secs()})`);
     await pyodide.runPythonAsync(`
 import sys
@@ -509,8 +498,28 @@ if "/" not in sys.path:
     let pangenomeList = null;
     /** Lengths: ``pangenome_lengths.json`` → MEMFS → ``app.load_lengths_bundle_path``. */
     let mplReady = null;
+    let plotModulesReady = null;
 
     const LENGTH_HIST_NUM_BINS = 40;
+
+    async function ensurePlotModules() {
+      if (!plotModulesReady) {
+        plotModulesReady = (async () => {
+          const plotBase = new URL(".", import.meta.url).href;
+          const [vRes, sRes] = await Promise.all([
+            fetch(new URL("viz_mums.py", plotBase)),
+            fetch(new URL("synteny_plot.py", plotBase)),
+          ]);
+          if (!vRes.ok) throw new Error("Could not load viz_mums.py.");
+          if (!sRes.ok) throw new Error("Could not load synteny_plot.py.");
+          const [vText, sText] = await Promise.all([vRes.text(), sRes.text()]);
+          pyodide.FS.writeFile("/viz_mums.py", vText);
+          pyodide.FS.writeFile("/synteny_plot.py", sText);
+          await pyodide.runPythonAsync("import synteny_plot");
+        })();
+      }
+      return plotModulesReady;
+    }
 
     function ensureMpl() {
       if (!mplReady) {
@@ -1320,9 +1329,12 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
       const btn = $("plotBtn");
       btn.disabled = true;
       setActiveTab("synteny");
-      setPlotLoading(true, "Loading matplotlib…");
-      status("Plotting…", "loading matplotlib if needed");
+      setPlotLoading(true, "Loading plot modules…");
+      status("Plotting…", "loading plot modules if needed");
       try {
+        await ensurePlotModules();
+        setPlotLoading(true, "Loading matplotlib…");
+        status("Plotting…", "loading matplotlib if needed");
         await ensureMpl();
         setPlotLoading(true, "Rendering synteny plot…");
         status("Plotting…", `matplotlib ready (${secs(q0)})`);

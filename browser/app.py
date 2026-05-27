@@ -266,27 +266,6 @@ async def _get_mums_expanding(idx, coords, seq_idx, max_steps: int = 8):
         steps += 1
 
 
-def format_bed(
-    contig_names, seq_lengths_multi, other_coords, sequences, path_placeholder="."
-):
-    """Same rows as extract_from_mums.extract_bed; last column is a placeholder in the browser."""
-    lines = []
-    for i, seq in enumerate(sequences):
-        try:
-            name, rel_offsets = sutils.convert_global_to_local_coords(
-                other_coords[i][0],
-                other_coords[i][1],
-                contig_names[int(seq)],
-                seq_lengths_multi[int(seq)],
-            )
-        except AssertionError:
-            continue
-        lines.append(
-            f"{name}\t{int(rel_offsets[0])}\t{int(rel_offsets[1])}\t{path_placeholder}\n"
-        )
-    return "".join(lines)
-
-
 def describe_ui() -> str:
     """JSON for genome / contig dropdowns (uses the loaded lengths bundle for ``ACTIVE_PANGENOME``)."""
     seq_lengths_multi, contig_names, n = _get_lengths_meta()
@@ -388,39 +367,6 @@ def plot_extract_png(seq_indices: list[int], dark: bool = False) -> str:
     )
 
 
-async def run(
-    seq_idx: int,
-    range_str: str,
-    sequences=None,
-) -> str:
-    """
-    Returns BED text or raises with a clear error message.
-    `range_str` is chr:start-end (same as shredtools extract -r).
-    """
-    seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta()
-    if not (0 <= seq_idx < num_seqs):
-        raise ValueError(f"seq_idx {seq_idx} invalid (N = {num_seqs})")
-    if sequences is not None and any(s >= num_seqs for s in sequences):
-        raise ValueError(f"Invalid sequence index (N = {num_seqs})")
-    if sequences is None:
-        sequences = list(range(num_seqs))
-
-    coords = sutils.convert_local_to_global_coords(
-        range_str, contig_names[seq_idx], seq_lengths_multi[seq_idx]
-    )
-    idx, _cached = await _get_index(seq_idx)
-    got, ranges, requested_bins = await _get_mums_expanding(idx, coords, seq_idx)
-    if got is None:
-        raise ValueError(
-            f"No bounding MUMs found for region {range_str!r} (bins {requested_bins})."
-        )
-    mums, right_key = got
-    _mum_bounds, other_coords = find_target_region(mums, coords, seq_idx, sequences, right_key=right_key)
-    return format_bed(
-        contig_names, seq_lengths_multi, other_coords, sequences, path_placeholder="."
-    )
-
-
 async def run_with_bounds(
     seq_idx: int,
     range_str: str,
@@ -442,7 +388,7 @@ async def run_with_bounds(
     coords = sutils.convert_local_to_global_coords(
         range_str, contig_names[seq_idx], seq_lengths_multi[seq_idx]
     )
-    idx, index_cached = await _get_index(seq_idx)
+    idx, _ = await _get_index(seq_idx)
     got, ranges, requested_bins = await _get_mums_expanding(idx, coords, seq_idx)
     if got is None:
         raise ValueError(
