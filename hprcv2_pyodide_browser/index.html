@@ -31,6 +31,8 @@
       --spinner-head: #444;
       --loading-bar-bg: #e8e8e8;
       --loading-bar-fg: #555;
+      --bulb-off: #888;
+      --bulb-on: #f0b429;
     }
     [data-theme="dark"] {
       color-scheme: dark;
@@ -56,30 +58,44 @@
       --spinner-head: #aaa;
       --loading-bar-bg: #333;
       --loading-bar-fg: #aaa;
+      --bulb-off: #666;
+      --bulb-on: #f4c430;
     }
     body {
+      position: relative;
       max-width: 52rem;
       margin: 1rem auto;
       padding: 0 0.75rem;
+      padding-top: 2.25rem;
       background: var(--bg);
       color: var(--text);
     }
     h1 { font-size: 1.6rem; margin: 0; }
-    .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
-    .page-header-main { flex: 1 1 auto; min-width: 0; }
-    .page-header-aside { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem; }
-    .logo { max-height: 132px; width: auto; pointer-events: none; }
-    [data-theme="dark"] .logo { filter: brightness(0) invert(1); }
-    .theme-toggle {
-      font-size: 0.85rem;
-      padding: 0.25rem 0.55rem;
+    .logo { float: right; max-height: 132px; width: auto; margin: 0 0 0.5rem 0.75rem; pointer-events: none; }
+    .clear { clear: both; }
+    .theme-bulb {
+      position: absolute;
+      top: 0;
+      right: 0.75rem;
+      z-index: 2;
+      width: 1.75rem;
+      height: 1.75rem;
+      padding: 0.2rem;
       border: 1px solid var(--border-tab);
       background: var(--surface);
-      color: var(--text);
       border-radius: 4px;
       cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--bulb-off);
+      line-height: 0;
     }
-    .clear { clear: both; }
+    .theme-bulb:hover { border-color: var(--border-strong); }
+    .theme-bulb[aria-pressed="true"] { color: var(--bulb-on); }
+    .theme-bulb svg { width: 1.15rem; height: 1.15rem; }
+    .theme-bulb .bulb-rays { opacity: 0; transition: opacity 0.15s; }
+    .theme-bulb[aria-pressed="true"] .bulb-rays { opacity: 1; }
     .hint { font-size: 0.9rem; color: var(--text-muted); }
     .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
     .tabs { display: flex; gap: 0.5rem; margin: 0.5rem 0; }
@@ -103,7 +119,7 @@
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     label { min-width: 6rem; }
     select, input[type="number"] { min-width: 10rem; }
-    button { padding: 0.35rem 0.75rem; cursor: pointer; }
+    button:not(.theme-bulb) { padding: 0.35rem 0.75rem; cursor: pointer; }
     #status { color: var(--text-subtle); font-size: 0.9rem; min-height: 1.2em; }
     #substatus { color: var(--text-faint); font-size: 0.85rem; min-height: 1.1em; }
     #out { width: 100%; box-sizing: border-box; min-height: 12rem; }
@@ -116,7 +132,7 @@
     .intro-md li { margin: 0.15rem 0; }
     .intro-md h2 { font-size: 1.05rem; margin: 0.5rem 0 0.25rem; }
     .intro-md h3 { font-size: 1rem; margin: 0.45rem 0 0.2rem; }
-    .intro-how-details { margin: 0.5rem 0 0.75rem; }
+    .intro-how-details { margin: 0.5rem 0 0.75rem; clear: both; }
     .intro-how-details summary { font-weight: 600; }
     .intro-how-body { margin-top: 0.5rem; }
     details {
@@ -207,15 +223,16 @@
   </style>
 </head>
 <body>
-  <div class="page-header">
-    <div class="page-header-main">
-      <h1>Shredtools extract</h1>
-    </div>
-    <div class="page-header-aside">
-      <button type="button" id="themeToggle" class="theme-toggle" aria-pressed="true" title="Switch light/dark theme">Light mode</button>
-      <img class="logo" src="shredtools_logo.png" alt="Shredtools logo" />
-    </div>
-  </div>
+  <button type="button" id="themeToggle" class="theme-bulb" aria-pressed="true" aria-label="Dark mode on" title="Dark mode on">
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+      <g class="bulb-rays">
+        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+      </g>
+      <path d="M9 21h6v-1H9v1zm3-18a6 6 0 0 0-6 6c0 2.2 1.2 4.1 3 5.2V17h6v-2.8c1.8-1.1 3-3 3-5.2a6 6 0 0 0-6-6z"/>
+    </svg>
+  </button>
+  <img class="logo" src="shredtools_logo.png" alt="Shredtools logo" />
+  <h1>Shredtools extract</h1>
   <div id="appIntroWrap" style="display: none;">
     <div id="appIntroRest" class="hint intro-md" hidden></div>
     <details id="appIntroDetails" class="intro-how-details">
@@ -555,9 +572,9 @@ if "/" not in sys.path:
     function updateThemeToggleLabel() {
       const dark = document.documentElement.dataset.theme === "dark";
       const btn = $("themeToggle");
-      btn.textContent = dark ? "Light mode" : "Dark mode";
       btn.setAttribute("aria-pressed", String(dark));
-      btn.title = dark ? "Switch to light theme" : "Switch to dark theme";
+      btn.setAttribute("aria-label", dark ? "Dark mode on" : "Dark mode off");
+      btn.title = dark ? "Dark mode on (click for light)" : "Light mode (click for dark)";
     }
 
     function applyTheme(theme) {
