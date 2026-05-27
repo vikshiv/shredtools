@@ -1,14 +1,14 @@
 # **shredtools**: pangenome coordinates from multi-MUMs
 
-Shredtools is a toolkit for querying homologous regions in a [mumemto](https://github.com/vikshiv/mumemto) pangenome. It reads binary `.bumbl` multi-MUM files, builds interval indexes (`.bumbl.bi`) for fast lookup, and extracts corresponding coordinates across the collection as BED (and optionally FASTA).
+Shredtools is a toolkit for querying a pangenome using multi-MUMs computed by [Mumemto](https://github.com/vikshiv/mumemto). It takes in a set of multi-MUMs (`.bumbl)`, builds an index (`.bumbl.bi`) for fast lookup, and enables operations like extracting syntenic regions across the pangenome, slicing a set of assemblies into smaller subunits (shreds), and refining the multiple alignment by finding more exact matches recursively.
 
-Shredtools expects a mumemto run that produced a `.bumbl` file (use `mumemto -b` or `mumemto convert`) and the matching `.lengths` sidecar from the same output prefix.
+Shredtools expects a set of multi-MUMs in a `.bumbl` file (use `mumemto -b` or `mumemto convert`) and a corresponding `.lengths`. See [Mumemto](https://github.com/vikshiv/mumemto) for details on file formats.
 
 ---
 
 ## Installation
 
-Requires [mumemto](https://github.com/vikshiv/mumemto) at runtime (not installed automatically by pip). Python 3.9+.
+Requires [mumemto](https://github.com/vikshiv/mumemto) at runtime (not installed automatically by pip, can be installed via conda, pip, or from source). Python 3.9+.
 
 ```bash
 git clone https://github.com/vikshiv/shredtools.git
@@ -21,27 +21,28 @@ You can also run `python -m shredtools`.
 
 **Pip dependencies:** `numpy`, `pysam`, `tqdm`
 
-**Optional:** `matplotlib` (for `extract --plot` / `--plot-full`); `.fai` indexes beside reference FASTAs, or the `agc` tool (`fasta --agc`) for sequence extraction.
+**Optional:** `matplotlib` (for `extract --plot` / `--plot-full`); `.fai` indexes beside reference FASTAs, or the `agc` tool (`fasta --agc`) for sequence extraction (can be installed via bioconda).
 
 ---
 
 ## Quick start
 
-After running mumemto on a collection (e.g. `mumemto assemblies/*.fa -o collection -b`), build an index and extract a region:
+After running mumemto on a collection of assemblies (e.g. `mumemto assemblies/*.fa -o pangenome -b`), build an index and extract a region:
 
 ```bash
-# Prepare .bumbl for indexing (sort required; filter optional)
-shredtools sort collection.bumbl -s 0
-shredtools filter collection.sorted.bumbl -o collection.coll.bumbl   # optional
+# Prepare .bumbl for indexing (sort and compute collinear blocks to filter out non-coordinate system MUMs)
+shredtools filter pangenome.bumbl -o pangenome_sorted.bumbl
 
 # Build .bumbl.bi (default: multi-index)
-shredtools index collection.coll.bumbl -s 0 -v
+shredtools index --multi pangenome_sorted.bumbl -v
 
-# Extract homologous BED, then fetch FASTA
-shredtools extract collection.coll.bumbl -s 0 -r chr1:1000000-2000000 \
-  -o regions/prefix -l collection.lengths
+# Extract syntenic regions, then fetch FASTA
+shredtools extract pangenome_sorted.bumbl -s 0 -r chr1:1000000-2000000 -o regions/prefix -l pangenome.lengths
 shredtools fasta regions/prefix.bed -o fasta_out/
 ```
+
+> [!TIP]  
+> You can overwrite the original `bumbl` file with `-i`
 
 ---
 
@@ -49,120 +50,102 @@ shredtools fasta regions/prefix.bed -o fasta_out/
 
 ### Index a `.bumbl` file
 
-`extract` on a `.bumbl` input requires a `.bumbl.bi` index alongside it. The index maps genomic bins to row ranges in the `.bumbl` file so only overlapping MUMs are loaded (including HTTP range requests for remote files).
+`extract` on a `.bumbl` input requires a `.bumbl.bi` index alongside it. The index maps genomic bins to row ranges in the `.bumbl` file so only subsets of MUMs are loaded at a time.
 
 **Prerequisites**
 
-1. **Sorted rows.** MUM rows must be non-decreasing on the reference column you index (`starts[:, seq_idx]`). Use `shredtools sort`; this drops embedded collinear-block metadata from the file.
-2. **Optional filter.** `shredtools filter` keeps only MUMs that belong to collinear blocks, which can yield a cleaner index for synteny-style queries.
+The input `bumbl` file should be pre-processed before indexing. `shredtools filter` can both sort and filter for collinear multi-MUMs in a single command. For completeness, the following prerequisites are required prior to indexing:
+
+1. **Sorted rows.** MUM rows must be sorted by position in one of the sequences. Use `shredtools sort`.
+2. **Optional filter.** `shredtools filter` keeps only MUMs that belong to collinear blocks, which form the coordinate system and filters out potentially spurious matches.
 
 ```bash
-shredtools sort collection.bumbl -s 0
-# → collection.sorted.bumbl (default output name)
+# achieves both pre-processing steps in one command, in place
+shredtools filter -i pangenome.bumbl
 
-shredtools filter collection.sorted.bumbl -o collection.coll.bumbl
-# optional; use -o explicitly (default output name differs)
+# split into two steps:
+shredtools sort pangenome.bumbl -s 0 -o pangenome.sorted.bumbl
+shredtools filter -i pangenome.sorted.bumbl
+# optional; use -o explicitly
 ```
 
 **Build the index**
+There are two index types. A single-index is based on one reference assembly and can handle queries with respect to regions in the reference coordinates. A multi-index is a slightly larger index that can accept queries of any region from any assembly.
 
 ```bash
-shredtools index collection.coll.bumbl -s 0
-# → collection.coll.bumbl.bi (default)
+shredtools index pangenome.coll.bumbl --multi # multi-index
+shredtools index pangenome.coll.bumbl -s 0 --single # single-index
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-s` / `--seq-idx` | `0` | Column used for sortedness check; reference axis for single-index |
-| `--multi` | on (default) | Multi-index: per-sequence bins (used by `extract`) |
-| `--single` | off | Single-index over one reference column |
-| `-w` / `--bin-width` | `1000000` | Genomic bin width (bp) |
-| `-o` / `--output` | `<bumbl>.bi` | Output path |
-| `--no-verify-sorted` | off | Skip non-decreasing check on `starts[:, seq_idx]` |
-| `--no-verify-checksum` | off | Skip post-write checksum verification |
-| `-v` / `--verbose` | off | Progress on stderr |
 
-**Examples**
+| Flag                   | Default             | Description                                                           |
+| ---------------------- | ------------------- | --------------------------------------------------------------------- |
+| `-s` / `--seq-idx`     | `0`                 | Reference assembly for single-index                                   |
+| `--multi` / `--single` | `--multi` (default) | Multi-index: per-sequence bins (used by `extract`)                    |
+| `-w` / `--bin-width`   | `1000000`           | Genomic bin width (bp) (large = smaller index, more memory per query) |
+| `-o` / `--output`      | `<bumbl>.bi`        | Output path                                                           |
+| `-v` / `--verbose`     | off                 | Progress on stderr                                                    |
 
-```bash
-# Default multi-index (recommended for extract)
-shredtools index collection.coll.bumbl -s 0 -v
 
-# Finer bins for dense genomes
-shredtools index collection.coll.bumbl -s 0 -w 500000 -o collection.coll.bumbl.bi
+> [!WARNING]
+> A `.bumbl.bi` file is a binary index corresponding to an associated `.bumbl` **row order**. If the order of the `.bumbl` file changes (such as running `shredtools sort`), then the index is invalid and needs to be re-generated. 
 
-# Single-reference index only
-shredtools index collection.coll.bumbl -s 0 --single -o collection.coll.single.bi
-```
-
-> [!TIP]
-> Run `shredtools stats collection.bumbl` to list expected sidecar files (`.lengths`, `.bi`, sorted/filtered variants).
-
-> [!NOTE]
-> Verify sort order without rewriting: `shredtools sort collection.bumbl -s 0 --verify`
-
----
-
-### `.bumbl.bi` index (overview)
-
-A `.bumbl.bi` file is a binary sidecar keyed to a specific `.bumbl` **row order**. It stores a small header (magic `bumblbi`, format byte, checksum over the first 1000 MUM lengths, bin width, sequence count) followed by bin structures that map genomic intervals to half-open MUM row ranges `[mum_start, mum_end)`.
-
-- **Multi-index (default, format byte 1):** per-sequence genomic bins. `extract` uses this for any reference column (`-s`).
-- **Single-index (format byte 0):** one reference column only; requires rows sorted on that column.
-
-For the full on-disk layout, query algorithms, and diagrams, see **[bumbl_index/bumbl_index.md](bumbl_index/bumbl_index.md)**.
+For the full index specifications, see **[bumbl_index/bumbl_index.md](bumbl_index/bumbl_index.md)**.
 
 ---
 
 ### Extract homologous regions
 
-Given a query interval on one pangenome sequence, `extract` finds the bounding multi-MUMs and reports the homologous interval on each selected genome as BED.
+Given a query interval on one pangenome sequence, `extract` finds the bounding multi-MUMs and reports the syntenic interval on each selected genome as BED.
 
 **Required inputs**
 
-| File | Resolution |
-|------|------------|
-| `collection.bumbl` | Positional argument |
-| `collection.bumbl.bi` | Default: `<mum_file>.bi`, or `-b` |
-| `collection.lengths` | Default: `<stem>.lengths`, or `-l` (mumemto multilengths format) |
 
-**Region format.** `--range` is **contig-local** on the sequence named by `-s`: `contig:start-end` (e.g. `chr1:1000000-2000000`). Shredtools converts this to global linear coordinates using the `.lengths` manifest, then queries the index.
+| File                 | Description                                                      |
+| -------------------- | ---------------------------------------------------------------- |
+| `pangenome.bumbl`    | Positional argument, can be a remote file url                    |
+| `pangenome.bumbl.bi` | Default: `<mum_file>.bi`, or `-b`                                |
+| `pangenome.lengths`  | Default: `<stem>.lengths`, or `-l` (mumemto multilengths format) |
+
+
+**Region format.** `--range` is **contig-local** on the sequence named by `-s`: `contig:start-end` (e.g. `chr1:1000000-2000000`).
 
 ```bash
-shredtools extract collection.coll.bumbl \
+shredtools extract pangenome.coll.bumbl \
   -s 0 \
   -r chr1:1000000-2000000 \
   -o regions/prefix \
-  -l collection.lengths
+  -l pangenome.lengths
 ```
 
-| Flag | Required | Description |
-|------|----------|-------------|
-| `-s` / `--seq-idx` | yes | Pangenome column that defines the query coordinate system |
-| `-r` / `--range` | yes | `contig:start-end` on that sequence |
-| `-o` / `--output` | no | Output prefix → `<prefix>.bed`; writes to stdout if omitted |
-| `-l` / `--lengths` | no | Multilengths file (default: `<stem>.lengths`) |
-| `-b` / `--bumblbi` | no | Index path (default: `<mum_file>.bi`) |
-| `-x` / `--sequences` | no | Subset of sequence indices (default: all) |
-| `--plot` | no | Write `<prefix>_extract_synteny.pdf` (requires `-o`, needs matplotlib) |
-| `--plot-full` | no | Write `<prefix>_full_synteny.pdf` (requires `-o`) |
+
+| Flag               | Required | Description                                                            |
+| ------------------ | -------- | ---------------------------------------------------------------------- |
+| `-s` / `--seq-idx` | yes      | Pangenome column that defines the query coordinate system              |
+| `-r` / `--range`   | yes      | `contig:start-end` on that sequence                                    |
+| `-o` / `--output`  | no       | Output prefix → `<prefix>.bed`; writes to stdout if omitted            |
+| `--plot`           | no       | Write `<prefix>_extract_synteny.pdf` (requires `-o`, needs matplotlib) |
+
+
+> [!TIP]
+> A `lengths` file or `bumbl.bi` index can be passed in with `-l` or `-b` respectively, if not automatically detected with the same input prefix.
 
 **More examples**
 
 ```bash
 # BED to stdout; only genomes 0, 1, 2
-shredtools extract collection.coll.bumbl -s 0 -r chr1:1-50000 -x 0 1 2
+shredtools extract pangenome.coll.bumbl -s 0 -r chr1:1-50000 -x 0 1 2
 
 # With synteny plot
-shredtools extract collection.coll.bumbl -s 0 -r chr1:1000000-2000000 \
-  -o regions/prefix -l collection.lengths --plot
+shredtools extract pangenome.coll.bumbl -s 0 -r chr1:1000000-2000000 \
+  -o regions/prefix -l pangenome.lengths --plot
 
 # Remote .bumbl and index (HTTP range requests)
-shredtools extract https://example.org/collection.bumbl -s 0 -r chr1:1-1000 \
-  -b https://example.org/collection.bumbl.bi -l collection.lengths
+shredtools extract https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000 \
+  -b https://url/to/pangenome.bumbl.bi -l pangenome.lengths
 ```
 
-When the query interval does not align exactly to MUM boundaries, `extract` prints `left margin` and/or `right margin` on stderr (distance in bp from the query edge to the enclosing MUM).
+When the query interval does not align exactly to MUM boundaries, `extract` prints `left margin` and/or `right margin` on stderr (distance in bp from the query edge to the enclosing MUM). This serves as a guide for the bounding region around the extracted regions.
 
 **BED output format**
 
@@ -172,9 +155,11 @@ Four tab-separated columns (0-based start, exclusive end):
 contig    start    end    /path/to/sequence.fa
 ```
 
-Paths come from the mumemto filelist embedded in the `.lengths` file.
+Paths come from the `.lengths` file.
 
 **Fetch sequences**
+
+You can extract the FASTA sequences of extracted regions using `shredtools fasta`. If the pangenome is compressed with an AGC archive (see [AGC](https://github.com/refresh-bio/agc)), you can provide it via the `--agc` option to fetch sequences directly from the archive.
 
 ```bash
 shredtools fasta regions/prefix.bed -o fasta_out/
@@ -186,16 +171,18 @@ shredtools fasta regions/prefix.bed -o fasta_out/ --agc archive.agc -t 8
 
 ## Other commands
 
-| Command | Description |
-|---------|-------------|
-| `shredtools shred` | Vertically slice a pangenome into homologous strips (BED/FASTA) |
-| `shredtools sort` | Sort a `.bumbl` by start on a reference column |
-| `shredtools filter` | Keep only collinear-block MUMs in a `.bumbl` |
-| `shredtools index` | Build a `.bumbl.bi` index for interval queries |
-| `shredtools extract` | Extract homologous regions from a query interval (BED) |
-| `shredtools fasta` | Fetch FASTA sequences for an extract BED |
-| `shredtools enhance` | Fill gaps between collinear MUMs with local mumemto |
-| `shredtools stats` | Print MUM file metadata and associated sidecar paths |
+
+| Command              | Description                                             |
+| -------------------- | ------------------------------------------------------- |
+| `shredtools shred`   | Vertically slice a pangenome into syntenic strips (BED) |
+| `shredtools sort`    | Sort a `.bumbl` by position in an assembly              |
+| `shredtools filter`  | Keep only collinear-block MUMs in a `.bumbl`            |
+| `shredtools index`   | Build a `.bumbl.bi` index for interval queries          |
+| `shredtools extract` | Extract syntenic regions from a query interval (BED)    |
+| `shredtools fasta`   | Fetch FASTA sequences for an extract/shred BED          |
+| `shredtools enhance` | Fill gaps between collinear MUMs with local mumemto     |
+| `shredtools stats`   | Print MUM file metadata and associated sidecar paths    |
+
 
 Run `shredtools <command> -h` for full options.
 
