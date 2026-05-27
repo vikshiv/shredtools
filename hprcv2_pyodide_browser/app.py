@@ -1,4 +1,4 @@
-# HPRCv2 region browser — same data path as mod_scripts/index_extract.py (no CLI, no files out).
+# HPRCv2 region browser — same extract path as shredtools/extract_from_mums.py (no CLI, no files out).
 import base64
 import json
 import re
@@ -269,15 +269,18 @@ async def _get_mums_expanding(idx, coords, seq_idx, max_steps: int = 8):
 def format_bed(
     contig_names, seq_lengths_multi, other_coords, sequences, path_placeholder="."
 ):
-    """Same rows as index_extract extract_bed; last column is a placeholder in the browser."""
+    """Same rows as extract_from_mums.extract_bed; last column is a placeholder in the browser."""
     lines = []
     for i, seq in enumerate(sequences):
-        name, rel_offsets = sutils.convert_global_to_local_coords(
-            other_coords[i][0],
-            other_coords[i][1],
-            contig_names[int(seq)],
-            seq_lengths_multi[int(seq)],
-        )
+        try:
+            name, rel_offsets = sutils.convert_global_to_local_coords(
+                other_coords[i][0],
+                other_coords[i][1],
+                contig_names[int(seq)],
+                seq_lengths_multi[int(seq)],
+            )
+        except AssertionError:
+            continue
         lines.append(
             f"{name}\t{int(rel_offsets[0])}\t{int(rel_offsets[1])}\t{path_placeholder}\n"
         )
@@ -391,7 +394,7 @@ async def run(
 ) -> str:
     """
     Returns BED text or raises with a clear error message.
-    `range_str` is chr:start-end (same as -r in index_extract).
+    `range_str` is chr:start-end (same as shredtools extract -r).
     """
     seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta()
     if not (0 <= seq_idx < num_seqs):

@@ -1,5 +1,8 @@
 # Vendored from shredtools/utils.py (index + range I/O for Pyodide / static hosting).
+# Keep in sync with shredtools/utils.py (_BUMBL_RANGE_HELPERS_VERSION) and
+# shredtools/extract_from_mums.py (get_mum_ranges_flanks, find_target_region margins).
 # HPRCv2 uses a multi-index only (FORMAT=1); single-index parsing is omitted.
+_BUMBL_RANGE_HELPERS_VERSION = 2
 #
 # To avoid a slow Pyodide micropip install, this file also includes a tiny subset
 # of `mumemto.utils` needed by this browser:
