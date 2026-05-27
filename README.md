@@ -1,5 +1,7 @@
 # **shredtools**: pangenome coordinates from multi-MUMs
 
+<img src="logo/shredtools_logo.png" alt="Shredtools logo" width="130" align="right"/>
+
 Shredtools is a toolkit for querying a pangenome using multi-MUMs computed by [Mumemto](https://github.com/vikshiv/mumemto). It takes in a set of multi-MUMs (`.bumbl)`, builds an index (`.bumbl.bi`) for fast lookup, and enables operations like extracting syntenic regions across the pangenome, slicing a set of assemblies into smaller subunits (shreds), and refining the multiple alignment by finding more exact matches recursively.
 
 Shredtools expects a set of multi-MUMs in a `.bumbl` file (use `mumemto -b` or `mumemto convert`) and a corresponding `.lengths`. See [Mumemto](https://github.com/vikshiv/mumemto) for details on file formats.
