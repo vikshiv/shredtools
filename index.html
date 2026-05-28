@@ -119,6 +119,11 @@
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     label { min-width: 6rem; }
     select, input[type="number"] { min-width: 10rem; }
+    .input-invalid {
+      outline: 2px solid #c44;
+      border-color: #c44;
+    }
+    #contigLen { white-space: nowrap; }
     button:not(.theme-bulb) { padding: 0.35rem 0.75rem; cursor: pointer; }
     #status { color: var(--text-subtle); font-size: 0.9rem; min-height: 1.2em; }
     #substatus { color: var(--text-faint); font-size: 0.85rem; min-height: 1.1em; }
@@ -272,6 +277,7 @@
   <div class="row">
     <label for="contig">Contig</label>
     <select id="contig" disabled></select>
+    <span id="contigLen" class="hint mono" aria-live="polite"></span>
   </div>
 
   <div class="row">
@@ -936,6 +942,136 @@ if "/" not in sys.path:
       return { ok: true, contig, start: Math.trunc(start), end: Math.trunc(end) };
     }
 
+    function getGenome(seqIdx) {
+      if (!manifest?.genomes) return null;
+      return manifest.genomes.find((x) => x.seq_idx === seqIdx) ?? null;
+    }
+
+    function contigLength(seqIdx, contigValue) {
+      const g = getGenome(seqIdx);
+      if (!g?.contigs || !g?.contig_lengths) return null;
+      const i = g.contigs.indexOf(contigValue);
+      if (i < 0) return null;
+      return g.contig_lengths[i];
+    }
+
+    function validateHalfOpenInterval(contig, start, end, L) {
+      const c = String(contig || "");
+      const s = Math.trunc(Number(start));
+      const e = Math.trunc(Number(end));
+      if (!Number.isFinite(L) || L < 0) {
+        return { ok: false, error: "Contig length unknown." };
+      }
+      if (!(0 <= s && s < e && e <= L)) {
+        return {
+          ok: false,
+          error:
+            `Region ${s}-${e} is invalid for contig ${prettyContig(c)} with length ${fmtBp(L)} ` +
+            "(expected half-open [start, end) in contig coordinates)",
+        };
+      }
+      return { ok: true, start: s, end: e };
+    }
+
+    function resolveIntervalInputs() {
+      if (!manifest) return { ok: false, error: "Still loading…" };
+      const seqIdx = parseInt($("genome").value, 10);
+      if (!Number.isFinite(seqIdx)) return { ok: false, error: "No genome selected." };
+
+      const regionText = String($("region").value || "").trim();
+      if (regionText) {
+        const parsed = parseRegion(regionText);
+        if (!parsed.ok) return { ok: false, error: parsed.error };
+        const contigWanted = ensureContigValue(parsed.contig);
+        if (!contigWanted) {
+          return { ok: false, error: `Invalid contig for selected genome: ${parsed.contig}` };
+        }
+        return {
+          ok: true,
+          seqIdx,
+          contig: contigWanted,
+          start: parsed.start,
+          end: parsed.end,
+          source: "region",
+        };
+      }
+
+      const contig = $("contig").value;
+      const start = Number($("start").value);
+      const end = Number($("end").value);
+      if (!contig) return { ok: false, error: "No contig selected." };
+      if (!Number.isFinite(start) || !Number.isFinite(end)) {
+        return { ok: false, error: "Start/end must be numbers." };
+      }
+      if (start >= end) {
+        return { ok: false, error: "Need start < end (half-open: end is exclusive)." };
+      }
+      return {
+        ok: true,
+        seqIdx,
+        contig,
+        start: Math.trunc(start),
+        end: Math.trunc(end),
+        source: "fields",
+      };
+    }
+
+    function validateResolvedInterval() {
+      const resolved = resolveIntervalInputs();
+      if (!resolved.ok) return resolved;
+      const L = contigLength(resolved.seqIdx, resolved.contig);
+      if (L == null) {
+        return { ok: false, error: "Contig not found for selected genome." };
+      }
+      const bounds = validateHalfOpenInterval(
+        resolved.contig,
+        resolved.start,
+        resolved.end,
+        L
+      );
+      if (!bounds.ok) return bounds;
+      return {
+        ok: true,
+        seqIdx: resolved.seqIdx,
+        contig: resolved.contig,
+        start: bounds.start,
+        end: bounds.end,
+        contigLen: L,
+      };
+    }
+
+    function setInputInvalid(el, invalid) {
+      el.classList.toggle("input-invalid", !!invalid);
+    }
+
+    function updateContigLengthLabel(contigValue) {
+      const el = $("contigLen");
+      if (!manifest) {
+        el.textContent = "";
+        return;
+      }
+      const seqIdx = parseInt($("genome").value, 10);
+      const contig = contigValue ?? $("contig").value;
+      const L = contigLength(seqIdx, contig);
+      el.textContent = L != null ? `${fmtBp(L)} bp` : "";
+    }
+
+    function refreshRegionValidation() {
+      if (!manifest || $("start").disabled) return;
+      const resolved = resolveIntervalInputs();
+      const v = resolved.ok ? validateResolvedInterval() : resolved;
+      const invalid = !v.ok;
+      setInputInvalid($("start"), invalid);
+      setInputInvalid($("end"), invalid);
+      setInputInvalid($("region"), invalid && String($("region").value || "").trim() !== "");
+      $("run").disabled = invalid;
+      if (resolved.ok) {
+        updateContigLengthLabel(resolved.contig);
+      } else {
+        updateContigLengthLabel();
+      }
+    }
+
     function updateRegionFromFields() {
       if (suppressRegionSync) return;
       const contigRaw = String($("contig").value || "");
@@ -1007,6 +1143,7 @@ if "/" not in sys.path:
           suppressRegionSync = false;
           // Now that sync is re-enabled, update Region to match the gene-selected interval.
           updateRegionFromFields();
+          refreshRegionValidation();
         });
       }
       status("Interval set from gene.", `${g} → ${contigWanted}:${hit.start}-${hit.end}`);
@@ -1024,6 +1161,7 @@ if "/" not in sys.path:
       $("region").disabled = false;
       $("run").disabled = false;
       $("lengthsHint").textContent = "Lengths bundle loaded.";
+      refreshRegionValidation();
       status("Lengths loaded. Set interval and click Run.", `elapsed ${secs()}`);
       // Gene UI visibility + loading is driven by the selected genome (seq_idx).
       $("genome").dispatchEvent(new Event("change"));
@@ -1136,6 +1274,7 @@ if "/" not in sys.path:
         sel.appendChild(o);
       }
       sel.disabled = false;
+      refreshRegionValidation();
     }
 
     $("pangenome").addEventListener("change", async () => {
@@ -1169,6 +1308,7 @@ if "/" not in sys.path:
     $("genome").addEventListener("change", () => {
       if (!manifest) return;
       syncContigOptions();
+      refreshRegionValidation();
       if (selectedSeqs) renderSeqList();
       const seqIdx = parseInt($("genome").value, 10);
       const build = seqIdxToBuild[seqIdx];
@@ -1223,18 +1363,22 @@ await app.warm_index(${seqIdx})
     $("region").addEventListener("input", () => {
       clearGeneIfUserEdit();
       maybeUpdateFieldsFromRegionLive();
+      refreshRegionValidation();
     });
     $("contig").addEventListener("change", () => {
       clearGeneIfUserEdit();
       updateRegionFromFields();
+      refreshRegionValidation();
     });
     $("start").addEventListener("input", () => {
       clearGeneIfUserEdit();
       updateRegionFromFields();
+      refreshRegionValidation();
     });
     $("end").addEventListener("input", () => {
       clearGeneIfUserEdit();
       updateRegionFromFields();
+      refreshRegionValidation();
     });
 
     $("run").addEventListener("click", async () => {
@@ -1242,32 +1386,13 @@ await app.warm_index(${seqIdx})
         status("Still loading…");
         return;
       }
-      const seqIdx = parseInt($("genome").value, 10);
-      let contig = $("contig").value;
-      let start = Number($("start").value);
-      let end = Number($("end").value);
-
-      // If Region is present + valid, prefer it over the separate fields.
-      const regionText = String($("region").value || "").trim();
-      if (regionText) {
-        const parsed = parseRegion(regionText);
-        if (!parsed.ok) {
-          status("Invalid region.", parsed.error);
-          return;
-        }
-        const contigWanted = ensureContigValue(parsed.contig);
-        if (!contigWanted) {
-          status("Invalid contig for selected genome.", String(parsed.contig));
-          return;
-        }
-        contig = contigWanted;
-        start = parsed.start;
-        end = parsed.end;
-      }
-      if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) {
-        status("Invalid start/end (need start < end).");
+      const v = validateResolvedInterval();
+      if (!v.ok) {
+        refreshRegionValidation();
+        status("Invalid interval.", v.error);
         return;
       }
+      const { seqIdx, contig, start, end } = v;
       const rangeStr = `${contig}:${start}-${end}`;
       const q0 = performance.now();
       status("Querying…", `HTTP Range reads to S3 (query ${secs(q0)})`);
@@ -1287,6 +1412,19 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
           `)
         );
         const result = JSON.parse(resultJson);
+        if (result.error) {
+          status("Could not run query.", result.error);
+          $("out").value = "";
+          showPlotButton(false);
+          clearSyntenyPlot();
+          renderIntervalsTable([]);
+          renderUnavailableTable([]);
+          renderLengthsView([]);
+          lastRows = null;
+          lastMeta = null;
+          lastUnavailable = null;
+          return;
+        }
         lastRows = result.rows ?? [];
         lastMeta = result;
         lastUnavailable = result.unavailable ?? [];
@@ -1310,9 +1448,10 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
         clearSyntenyPlot();
         setActiveTab("table");
       } catch (err) {
+        console.error(err);
         const msg = err?.message ?? String(err);
         status("Error", msg);
-        $("out").value = msg;
+        $("out").value = "";
         showPlotButton(false);
         clearSyntenyPlot();
         renderIntervalsTable([]);

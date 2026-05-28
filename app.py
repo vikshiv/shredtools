@@ -278,6 +278,7 @@ def describe_ui() -> str:
                 "seq_idx": i,
                 "label": label,
                 "contigs": cnames,
+                "contig_lengths": [int(x) for x in seq_lengths_multi[i]],
             }
         )
     return json.dumps({"n_seqs": n, "genomes": genomes})
@@ -367,6 +368,22 @@ def plot_extract_png(seq_indices: list[int], dark: bool = False) -> str:
     )
 
 
+def _run_error_message(exc: BaseException) -> str:
+    """User-facing message for expected extract failures (no Pyodide traceback)."""
+    msg = exc.args[0] if exc.args else str(exc)
+    s = str(msg)
+    if "No bounding MUMs" in s:
+        return "No flanking multi-MUMs were found for this interval."
+    if "Selected-genome region spans multiple contigs" in s:
+        return "No flanking multi-MUM between interval and contig end."
+    if "Loaded MUM slice does not bound" in s:
+        return (
+            "MUM markers near this interval do not fully bracket the request. "
+            "Try a wider region."
+        )
+    return s
+
+
 async def run_with_bounds(
     seq_idx: int,
     range_str: str,
@@ -375,97 +392,112 @@ async def run_with_bounds(
     """
     Like `run`, but returns JSON: { bed: str, bounds: { contig, start, end } }.
     Bounds are the extracted interval for the selected genome (seq_idx), in contig-local coords.
+    On failure returns ``{"error": "<message>"}`` instead of raising.
     """
     global _LAST_EXTRACT
     _LAST_EXTRACT = None
 
-    seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta()
-    if not (0 <= seq_idx < num_seqs):
-        raise ValueError(f"seq_idx {seq_idx} invalid (N = {num_seqs})")
-    # For the browser app we always compute all sequences; UI-side filtering is handled in JS.
-    sequences = list(range(num_seqs))
+    try:
+        seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta()
+        if not (0 <= seq_idx < num_seqs):
+            raise ValueError(f"seq_idx {seq_idx} invalid (N = {num_seqs})")
+        # For the browser app we always compute all sequences; UI-side filtering is handled in JS.
+        sequences = list(range(num_seqs))
 
-    coords = sutils.convert_local_to_global_coords(
-        range_str, contig_names[seq_idx], seq_lengths_multi[seq_idx]
-    )
-    idx, _ = await _get_index(seq_idx)
-    got, ranges, requested_bins = await _get_mums_expanding(idx, coords, seq_idx)
-    if got is None:
-        raise ValueError(
-            f"No bounding MUMs found for region {range_str!r} (bins {requested_bins})."
+        coords = sutils.convert_local_to_global_coords(
+            range_str, contig_names[seq_idx], seq_lengths_multi[seq_idx]
         )
-    # Each element of `ranges` is a half-open [mum_start, mum_end) slice.
-    mum_chunks = int(len(ranges))
-    mums_sliced = int(sum(int(b) - int(a) for a, b in ranges))
-
-    mums, right_key = got
-    mum_bounds, other_coords = find_target_region(mums, coords, seq_idx, sequences, right_key=right_key)
-    _LAST_EXTRACT = {
-        "seq_idx": int(seq_idx),
-        "coords": coords,
-        "mums": mums,
-        "mum_bounds": mum_bounds,
-        "other_coords": other_coords,
-        "sequences": sequences,
-    }
-    rows = []
-    unavailable = []
-    _span_re = re.compile(r"start and end coords are in different contigs:\s+(.+?)\s+and\s+(.+)$")
-    for i, seq in enumerate(sequences):
-        try:
-            name, rel_offsets = sutils.convert_global_to_local_coords(
-                other_coords[i][0],
-                other_coords[i][1],
-                contig_names[int(seq)],
-                seq_lengths_multi[int(seq)],
+        idx, _ = await _get_index(seq_idx)
+        got, ranges, requested_bins = await _get_mums_expanding(idx, coords, seq_idx)
+        if got is None:
+            raise ValueError(
+                f"No bounding MUMs found for region {range_str!r} (bins {requested_bins})."
             )
-        except AssertionError as e:
-            msg = e.args[0] if e.args else str(e)
-            m = _span_re.search(str(msg))
-            c1, c2 = (m.group(1), m.group(2)) if m else ("", "")
-            label = contig_names[int(seq)][0] if contig_names[int(seq)] else f"seq_{int(seq)}"
-            unavailable.append(
+        # Each element of `ranges` is a half-open [mum_start, mum_end) slice.
+        mum_chunks = int(len(ranges))
+        mums_sliced = int(sum(int(b) - int(a) for a, b in ranges))
+
+        mums, right_key = got
+        mum_bounds, other_coords = find_target_region(
+            mums, coords, seq_idx, sequences, right_key=right_key
+        )
+        _LAST_EXTRACT = {
+            "seq_idx": int(seq_idx),
+            "coords": coords,
+            "mums": mums,
+            "mum_bounds": mum_bounds,
+            "other_coords": other_coords,
+            "sequences": sequences,
+        }
+        rows = []
+        unavailable = []
+        _span_re = re.compile(
+            r"start and end coords are in different contigs:\s+(.+?)\s+and\s+(.+)$"
+        )
+        for i, seq in enumerate(sequences):
+            try:
+                name, rel_offsets = sutils.convert_global_to_local_coords(
+                    other_coords[i][0],
+                    other_coords[i][1],
+                    contig_names[int(seq)],
+                    seq_lengths_multi[int(seq)],
+                )
+            except AssertionError as e:
+                msg = e.args[0] if e.args else str(e)
+                m = _span_re.search(str(msg))
+                c1, c2 = (m.group(1), m.group(2)) if m else ("", "")
+                label = (
+                    contig_names[int(seq)][0]
+                    if contig_names[int(seq)]
+                    else f"seq_{int(seq)}"
+                )
+                unavailable.append(
+                    {
+                        "seq_idx": int(seq),
+                        "label": label,
+                        "contig_a": str(c1),
+                        "contig_b": str(c2),
+                        "reason": str(msg),
+                    }
+                )
+                continue
+            rows.append(
                 {
                     "seq_idx": int(seq),
-                    "label": label,
-                    "contig_a": str(c1),
-                    "contig_b": str(c2),
-                    "reason": str(msg),
+                    "contig": name,
+                    "start": int(rel_offsets[0]),
+                    "end": int(rel_offsets[1]),
                 }
             )
-            continue
-        rows.append(
+
+        # other_coords is aligned with `sequences`; when sequences is default, index==seq_idx.
+        try:
+            self_i = sequences.index(seq_idx)
+        except ValueError:
+            self_i = 0
+        b0, b1 = other_coords[self_i]
+        try:
+            contig, rel = sutils.convert_global_to_local_coords(
+                b0, b1, contig_names[seq_idx], seq_lengths_multi[seq_idx]
+            )
+        except AssertionError as e:
+            # MUM-bounded interval spans contigs on the selected genome.
+            msg = e.args[0] if e.args else str(e)
+            raise ValueError(
+                f"Selected-genome region spans multiple contigs: {msg}"
+            ) from None
+        left_margin, right_margin = compute_margins(
+            mums, coords, seq_idx, right_key=right_key
+        )
+
+        return json.dumps(
             {
-                "seq_idx": int(seq),
-                "contig": name,
-                "start": int(rel_offsets[0]),
-                "end": int(rel_offsets[1]),
+                "rows": rows,
+                "bounds": {"contig": contig, "start": int(rel[0]), "end": int(rel[1])},
+                "margins": {"left": left_margin, "right": right_margin},
+                "unavailable": unavailable,
+                "mum_slices": {"chunks": mum_chunks, "mums": mums_sliced},
             }
         )
-
-    # other_coords is aligned with `sequences`; when sequences is default, index==seq_idx.
-    try:
-        self_i = sequences.index(seq_idx)
-    except ValueError:
-        self_i = 0
-    b0, b1 = other_coords[self_i]
-    try:
-        contig, rel = sutils.convert_global_to_local_coords(
-            b0, b1, contig_names[seq_idx], seq_lengths_multi[seq_idx]
-        )
-    except AssertionError as e:
-        # This happens when the *requested region itself* spans contigs on the selected genome
-        # (e.g. end runs off the contig). Return a clean error instead of a Pyodide traceback.
-        msg = e.args[0] if e.args else str(e)
-        raise ValueError(f"Selected-genome region spans multiple contigs: {msg}") from None
-    left_margin, right_margin = compute_margins(mums, coords, seq_idx, right_key=right_key)
-
-    return json.dumps(
-        {
-            "rows": rows,
-            "bounds": {"contig": contig, "start": int(rel[0]), "end": int(rel[1])},
-            "margins": {"left": left_margin, "right": right_margin},
-            "unavailable": unavailable,
-            "mum_slices": {"chunks": mum_chunks, "mums": mums_sliced},
-        }
-    )
+    except (ValueError, AssertionError) as e:
+        return json.dumps({"error": _run_error_message(e)})
