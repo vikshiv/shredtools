@@ -123,31 +123,44 @@ def validate_fai_paths(rows: list[RegionLine]) -> list[str]:
     return errors
 
 
-def list_agc_contigs(agc: str, archive: str) -> set[str]:
+def probe_agc_region(agc: str, archive: str, region: str) -> str | None:
+    """Return an error message if ``agc getctg`` fails for *region*, else None."""
     result = subprocess.run(
-        [agc, "listctg", archive],
-        check=True,
+        [agc, "getctg", archive, region],
         capture_output=True,
         text=True,
     )
-    contigs: set[str] = set()
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    if result.returncode == 0:
+        return None
+    return (result.stderr or result.stdout or "agc getctg failed").strip()
+
+
+def validate_agc_regions(
+    rows: list[RegionLine], agc: str, archive: str, verbose: bool = False
+) -> list[str]:
+    """Probe each BED region with ``agc getctg``; return unique error messages."""
+    errors: list[str] = []
+    seen_errors: set[str] = set()
+    region_cache: dict[str, str | None] = {}
+    row_iter: Sequence[RegionLine] = rows
+    if verbose:
+        row_iter = tqdm(rows, desc="validate", unit="region")
+    for r in row_iter:
+        try:
+            region = region_to_interval(r.contig, r.start, r.end)
+        except ValueError as e:
+            msg = f"invalid region {r.contig}:{r.start}-{r.end}: {e}"
+            if msg not in seen_errors:
+                seen_errors.add(msg)
+                errors.append(msg)
             continue
-        parts = line.split()
-        if len(parts) >= 2:
-            contigs.add(parts[-1])
-        elif len(parts) == 1:
-            contigs.add(parts[0])
-    return contigs
-
-
-def validate_agc_contigs(rows: list[RegionLine], agc_contigs: set[str]) -> list[str]:
-    missing = sorted({r.contig for r in rows if r.contig not in agc_contigs})
-    if not missing:
-        return []
-    return [f"contig not in AGC archive: {c}" for c in missing]
+        if region not in region_cache:
+            region_cache[region] = probe_agc_region(agc, archive, region)
+        err = region_cache[region]
+        if err and err not in seen_errors:
+            seen_errors.add(err)
+            errors.append(err)
+    return errors
 
 
 def split_multifasta(combined_path: str, out_names: list[str], out_dir: str) -> None:
@@ -306,31 +319,21 @@ def run_agc_extract(
     agc: str,
     threads: int,
     multi_fasta: bool,
+    verbose: bool,
 ) -> None:
-    try:
-        agc_contigs = list_agc_contigs(agc, archive)
-    except subprocess.CalledProcessError as e:
-        err = e.stderr.decode("utf-8", errors="replace") if e.stderr else str(e)
-        print(f"agc listctg failed: {err.strip()}", file=sys.stderr)
-        raise SystemExit(1) from e
-
-    contig_errors = validate_agc_contigs(rows, agc_contigs)
-    if contig_errors:
+    region_errors = validate_agc_regions(rows, agc, archive, verbose)
+    if region_errors:
         print("Preflight errors:", file=sys.stderr)
-        for msg in contig_errors:
+        for msg in region_errors:
             print(f"  {msg}", file=sys.stderr)
         raise SystemExit(1)
 
-    regions: list[str] = []
-    for r in rows:
-        try:
-            regions.append(region_to_interval(r.contig, r.start, r.end))
-        except ValueError as e:
-            print(f"invalid region {r.contig}:{r.start}-{r.end}: {e}", file=sys.stderr)
-            raise SystemExit(1) from e
+    regions = [region_to_interval(r.contig, r.start, r.end) for r in rows]
 
     combined_path = os.path.join(out_dir, COMBINED_FASTA_NAME)
     cmd = [agc, "getctg", "-t", str(threads), "-o", combined_path, archive, *regions]
+    if verbose:
+        print(f"Running agc getctg for {len(regions)} region(s)...", file=sys.stderr)
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
@@ -339,6 +342,8 @@ def run_agc_extract(
         raise SystemExit(1) from e
 
     if not multi_fasta:
+        if verbose:
+            print(f"Splitting {COMBINED_FASTA_NAME} into {len(out_names)} file(s)...", file=sys.stderr)
         split_multifasta(combined_path, out_names, out_dir)
         os.remove(combined_path)
 
@@ -367,7 +372,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Write one multi-record FASTA (combined_extract.fa) instead of one file per BED row",
     )
     p.add_argument("--agc-bin", default="agc", help="agc executable (default: agc)")
-    p.add_argument("-v", "--verbose", action="store_true", help="Show a tqdm progress bar on stderr")
+    p.add_argument("-v", "--verbose", action="store_true", help="Show progress on stderr (tqdm / status messages)")
     args = p.parse_args(list(argv) if argv is not None else None)
 
     rows = parse_bed_file(args.bed_file)
@@ -381,7 +386,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             raise SystemExit(1)
         out_names = [] if args.multi_fasta else assign_output_filenames(rows)
         run_agc_extract(
-            rows, out_dir, out_names, args.agc, args.agc_bin, threads, args.multi_fasta
+            rows,
+            out_dir,
+            out_names,
+            args.agc,
+            args.agc_bin,
+            threads,
+            args.multi_fasta,
+            args.verbose,
         )
     elif args.multi_fasta:
         run_pysam_extract_multifasta(rows, out_dir, args.verbose)
