@@ -6,39 +6,75 @@ from bisect import bisect_right
 
 import bumbl_index_utils as sutils
 
-# Shown under the page title after Pyodide loads (`index.html` renders Markdown).
-# Split on the first blank line: text *after* it stays visible; the *first* paragraph is
-# inside a collapsed **How does it work?** toggle. Leave INTRO empty to hide the block.
-# Markdown is HTML in the browser (trusted — only you should edit this string).
-INTRO = """
-Shredtools uses **multi-MUMs**, collinear exact match markers along a pangenome, to identify and extract homologous regions to a query region of interest. Sometimes for a query region, the nearest flanking multi-MUM markers are some distance away from the requested interval. We report this distance on each side as "bounds". Bounds of 0 on each side indicate that the interval falls directly on multi-MUMs and the exact position of the corresponding sequence in each assembly can be found. This means the extracted region is *likely* a homologous sequence to your region of interest.
-
-We use two different datasets from the Human Pangenome Reference Consortium (HPRC). Release 1 contains 92 assemblies and release 2 contains 476. For release 2, we also include an additional multi-MUM index with improved coverage, which we recommend as the default index.
-
-All indexes are hosted thanks to the AWS Open Data Sponsorship Program and are freely available to query and for download and offline use.
-"""
 _S3_MUMEMTO = "https://genome-idx.s3.amazonaws.com/mumemto"
 
-# Each preset: .bumbl and .bumbl.bi on S3. Contig/length metadata lives in ``pangenome_lengths.json``
-# (built with ``lengths_to_json.py``) and is loaded at startup via ``load_lengths_bundle_path``.
+# Each preset: .bumbl, .bumbl.bi, and .lengths on S3. Contig/length metadata for the browser
+# also lives in ``pangenome_lengths.json`` (built with ``lengths_to_json.py``).
 # Order preserved for dropdown: enhanced default, then HPRCr2 merged, then HPRCr1.
 PANGENOMES: dict[str, dict[str, str]] = {
     "hprcv2_enhanced": {
         "label": "HPRCr2 (enhanced)",
         "bumbl": f"{_S3_MUMEMTO}/hprcv2_enhanced_merged.bumbl",
         "bi": f"{_S3_MUMEMTO}/hprcv2_enhanced_merged.bumbl.bi",
+        "lengths": f"{_S3_MUMEMTO}/hprcv2_enhanced_merged.lengths",
     },
     "hprcv2_merged": {
         "label": "HPRCr2",
         "bumbl": f"{_S3_MUMEMTO}/hprcv2_merged.bumbl",
         "bi": f"{_S3_MUMEMTO}/hprcv2_merged.bumbl.bi",
+        "lengths": f"{_S3_MUMEMTO}/hprcv2_merged.lengths",
     },
     "hprcv1": {
         "label": "HPRCr1",
         "bumbl": f"{_S3_MUMEMTO}/hprcv1.bumbl",
         "bi": f"{_S3_MUMEMTO}/hprcv1.bumbl.bi",
+        "lengths": f"{_S3_MUMEMTO}/hprcv1.lengths",
     },
 }
+
+
+def _bumbl_stem(bumbl_url: str) -> str:
+    return bumbl_url.rsplit("/", 1)[-1].removesuffix(".bumbl")
+
+
+def _build_intro() -> str:
+    """Markdown for the page intro (see comment on ``INTRO``)."""
+    order = ["hprcv2_enhanced", "hprcv2_merged", "hprcv1"]
+    collapsed = [
+        "Shredtools uses **multi-MUMs**, collinear exact match markers along a pangenome, "
+        "to identify and extract homologous regions to a query region of interest. Sometimes "
+        "for a query region, the nearest flanking multi-MUM markers are some distance away "
+        'from the requested interval. We report this distance on each side as "bounds". '
+        "Bounds of 0 on each side indicate that the interval falls directly on multi-MUMs and "
+        "the exact position of the corresponding sequence in each assembly can be found. This "
+        "means the extracted region is *likely* a homologous sequence to your region of interest.",
+        f"**Index files** — hosted at [`s3://genome-idx/mumemto/`]({_S3_MUMEMTO}/). "
+        "Each pangenome preset uses a `.bumbl`, `.bumbl.bi`, and `.lengths` trio:",
+    ]
+    for key in order:
+        p = PANGENOMES[key]
+        stem = _bumbl_stem(p["bumbl"])
+        collapsed.append(f"- **{p['label']}** (`{stem}`):")
+        collapsed.append(f"  - [`{stem}.bumbl`]({p['bumbl']})")
+        collapsed.append(f"  - [`{stem}.bumbl.bi`]({p['bi']})")
+        collapsed.append(f"  - [`{stem}.lengths`]({p['lengths']})")
+
+    visible = [
+        "We use two different datasets from the Human Pangenome Reference Consortium (HPRC). "
+        "Release 1 contains 92 assemblies and release 2 contains 476. For release 2, we also "
+        "include an additional multi-MUM index with improved coverage, which we recommend as "
+        "the default index.",
+        "All indexes are hosted thanks to the AWS Open Data Sponsorship Program and are freely "
+        "available to query and for download and offline use.",
+    ]
+    return "\n".join(collapsed) + "\n\n" + "\n\n".join(visible)
+
+
+# Shown under the page title after Pyodide loads (`index.html` renders Markdown).
+# Split on the first blank line: text *after* it stays visible; the *first* paragraph is
+# inside a collapsed **How does it work?** toggle. Leave INTRO empty to hide the block.
+# Markdown is HTML in the browser (trusted — only you should edit this string).
+INTRO = _build_intro()
 
 ACTIVE_PANGENOME = "hprcv2_enhanced"
 

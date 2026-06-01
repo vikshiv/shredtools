@@ -174,6 +174,8 @@
     }
     #plotBtn { display: none; }
     #plotBtn.visible { display: inline-block; }
+    #plotDownloadBtn { display: none; }
+    #plotDownloadBtn.visible { display: inline-block; }
     #syntenyImg {
       width: 100%;
       max-width: 100%;
@@ -361,7 +363,10 @@
     <canvas id="lengthsHistCanvas" width="800" height="240" aria-label="Histogram of region lengths in base pairs"></canvas>
   </div>
   <div id="panelSynteny" class="panel" role="tabpanel" aria-labelledby="tabSynteny">
-    <p id="syntenyHint" class="hint">Run a query, then click Plot to render MUM extract synteny (matplotlib loads on first plot).</p>
+    <div class="row" style="margin-bottom: 0.25rem;">
+      <p id="syntenyHint" class="hint" style="flex: 1 1 auto; margin: 0;">Run a query, then click Plot to render MUM extract synteny (matplotlib loads on first plot).</p>
+      <button type="button" id="plotDownloadBtn" disabled>Download PNG</button>
+    </div>
     <div id="plotLoading" class="plot-loading" hidden aria-live="polite" aria-busy="false">
       <div class="plot-spinner" role="progressbar" aria-label="Plot in progress"></div>
       <div class="plot-loading-bar" aria-hidden="true"></div>
@@ -540,6 +545,21 @@ if "/" not in sys.path:
       btn.disabled = !show;
     }
 
+    function showPlotDownload(show) {
+      const btn = $("plotDownloadBtn");
+      btn.classList.toggle("visible", !!show);
+      btn.disabled = !show;
+    }
+
+    function syntenyDownloadFilename() {
+      const b = lastMeta?.bounds;
+      if (b?.contig != null && b.start != null && b.end != null) {
+        const contig = String(b.contig).replace(/[^\w.-]+/g, "_");
+        return `synteny_${contig}_${b.start}-${b.end}.png`;
+      }
+      return "synteny_extract.png";
+    }
+
     function setPlotLoading(on, text) {
       const wrap = $("plotLoading");
       wrap.classList.toggle("visible", !!on);
@@ -556,6 +576,7 @@ if "/" not in sys.path:
 
     function clearSyntenyPlot() {
       setPlotLoading(false);
+      showPlotDownload(false);
       const img = $("syntenyImg");
       img.removeAttribute("src");
       img.classList.remove("visible");
@@ -1463,6 +1484,18 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
       }
     });
 
+    $("plotDownloadBtn").addEventListener("click", () => {
+      const src = $("syntenyImg").src;
+      if (!src) return;
+      const a = document.createElement("a");
+      a.href = src;
+      a.download = syntenyDownloadFilename();
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    });
+
     $("plotBtn").addEventListener("click", async () => {
       const q0 = performance.now();
       const btn = $("plotBtn");
@@ -1494,6 +1527,7 @@ app.plot_extract_png(${JSON.stringify(seqs)}, ${dark ? "True" : "False"})
         setPlotLoading(false);
         $("syntenyImg").src = "data:image/png;base64," + plotResult.png_b64;
         $("syntenyImg").classList.add("visible");
+        showPlotDownload(true);
         $("syntenyHint").textContent =
           `Extract synteny: ${plotResult.n_mums} MUMs across ${plotResult.n_rows} assemblies.`;
         $("syntenyHint").hidden = false;
