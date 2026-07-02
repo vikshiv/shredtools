@@ -38,6 +38,9 @@ def _bumbl_stem(bumbl_url: str) -> str:
     return bumbl_url.rsplit("/", 1)[-1].removesuffix(".bumbl")
 
 
+INTRO_VISIBLE_SEP = "\n\n---\n\n"
+
+
 def _build_intro() -> str:
     """Markdown for the page intro (see comment on ``INTRO``)."""
     order = ["hprcv2_enhanced", "hprcv2_merged", "hprcv1"]
@@ -74,12 +77,12 @@ def _build_intro() -> str:
         "All indexes are hosted thanks to the AWS Open Data Sponsorship Program and are freely "
         "available to query and for download and offline use.",
     ]
-    return "\n".join(collapsed) + "\n\n" + "\n\n".join(visible)
+    return "\n".join(collapsed) + INTRO_VISIBLE_SEP + "\n\n".join(visible)
 
 
 # Shown under the page title after Pyodide loads (`index.html` renders Markdown).
-# Split on the first blank line: text *after* it stays visible; the *first* paragraph is
-# inside a collapsed **How does it work?** toggle. Leave INTRO empty to hide the block.
+# Split on ``INTRO_VISIBLE_SEP``: text before it is inside **How does it work?**;
+# text after stays visible. Leave INTRO empty to hide the block.
 # Markdown is HTML in the browser (trusted — only you should edit this string).
 INTRO = _build_intro()
 

@@ -140,6 +140,16 @@
     .intro-how-details { margin: 0.5rem 0 0.75rem; clear: both; }
     .intro-how-details summary { font-weight: 600; }
     .intro-how-body { margin-top: 0.5rem; }
+    .app-footer {
+      margin-top: 2rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--text-faint);
+    }
+    .app-footer a { color: var(--details-summary); }
+    .app-footer p { margin: 0; }
+    .app-footer p + p { margin-top: 0.35rem; }
     details {
       font-size: 0.9rem;
       margin: 0.75rem 0;
@@ -432,6 +442,20 @@
     <img id="syntenyImg" alt="MUM extract synteny plot" />
   </div>
 
+  <footer id="appFooter" class="app-footer">
+    <p>
+      Shredtools and Mumemto are the work of
+      <a href="https://vikshiv.github.io">Vikram Shivakumar</a>
+      and
+      <a href="https://www.langmead-lab.org">Ben Langmead</a>.
+    </p>
+    <p>
+      <a href="https://github.com/vikshiv/shredtools">GitHub</a> ·
+      <a href="https://github.com/vikshiv/shredtools/issues">Report an issue</a> ·
+      See <a href="https://github.com/vikshiv/shredtools">GitHub</a> for information on how to cite Shredtools.
+    </p>
+  </footer>
+
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js"></script>
   <script type="module">
@@ -472,13 +496,20 @@
       }
       let first;
       let rest;
-      const m = /\n\s*\n/.exec(s);
-      if (!m) {
-        first = s;
-        rest = "";
+      const sep = "\n\n---\n\n";
+      const sepIdx = s.indexOf(sep);
+      if (sepIdx === -1) {
+        const m = /\n\s*\n/.exec(s);
+        if (!m) {
+          first = s;
+          rest = "";
+        } else {
+          first = s.slice(0, m.index).trim();
+          rest = s.slice(m.index).replace(/^\s*\n+/, "").trim();
+        }
       } else {
-        first = s.slice(0, m.index).trim();
-        rest = s.slice(m.index).replace(/^\s*\n+/, "").trim();
+        first = s.slice(0, sepIdx).trim();
+        rest = s.slice(sepIdx + sep.length).trim();
       }
 
       const parse =
@@ -1351,7 +1382,7 @@ base64.b64encode(data).decode()
       $("end").disabled = false;
       $("region").disabled = false;
       $("run").disabled = false;
-      $("lengthsHint").textContent = "Lengths bundle loaded.";
+      $("lengthsHint").textContent = "";
       refreshRegionValidation();
       status("Lengths loaded. Set interval and click Run.", `elapsed ${secs()}`);
       // Gene UI visibility + loading is driven by the selected genome (seq_idx).
