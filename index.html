@@ -174,6 +174,12 @@
     }
     #plotBtn { display: none; }
     #plotBtn.visible { display: inline-block; }
+    #fastaDownloadBtn { display: none; }
+    #fastaDownloadBtn.visible { display: inline-block; }
+    #fastaSaveBtn { display: none; }
+    #fastaSaveBtn.visible { display: inline-block; }
+    #fastaGzipWrap { display: none; align-items: center; gap: 0.35rem; margin: 0; }
+    #fastaGzipWrap.visible { display: inline-flex; }
     #plotDownloadBtn { display: none; }
     #plotDownloadBtn.visible { display: inline-block; }
     #syntenyImg {
@@ -226,6 +232,26 @@
     @keyframes plot-bar-slide {
       0% { transform: translateX(-110%); }
       100% { transform: translateX(350%); }
+    }
+    #fastaProgress {
+      display: none;
+      margin: 0.35rem 0 0.5rem;
+    }
+    #fastaProgress.visible { display: block; }
+    #fastaProgressTrack {
+      width: min(100%, 24rem);
+      height: 6px;
+      background: var(--loading-bar-bg);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 0.35rem;
+    }
+    #fastaProgressBar {
+      height: 100%;
+      width: 0%;
+      background: var(--loading-bar-fg);
+      border-radius: 3px;
+      transition: width 0.15s ease;
     }
   </style>
 </head>
@@ -301,10 +327,38 @@
   <div class="row">
     <button type="button" id="run" disabled>Run</button>
     <button type="button" id="plotBtn" disabled>Plot</button>
+    <button type="button" id="fastaDownloadBtn" disabled>Build FASTA</button>
+    <label id="fastaGzipWrap" class="hint" for="fastaGzip">
+      <input type="checkbox" id="fastaGzip" />
+      gzip
+    </label>
+    <button type="button" id="fastaSaveBtn" disabled>Save FASTA</button>
   </div>
+
+  <details id="tipsDetails" class="intro-how-details">
+    <summary>Tips</summary>
+    <div class="hint intro-md intro-how-body">
+      <p>Shredtools runs completely client-side. Downloading large regions across many assemblies may slow down your browser temporarily.</p>
+      <ul>
+        <li>Select a <strong>Genome</strong> and <strong>Contig</strong>, then set <strong>Start</strong> / <strong>End</strong>, or type a single <strong>Region</strong> (<code>CONTIG:start-end</code>). The contig dropdown applies to the start/end fields.</li>
+        <li>On CHM13 or GRCh38, pick a gene from the <strong>Gene</strong> list to auto-populate the region.</li>
+        <li>After <strong>Build FASTA</strong>, click <strong>Save FASTA</strong> (or <strong>Save FASTA.gz</strong>) to download.</li>
+        <li>FASTA download is available for HPRCr2 pangenomes only (<code>hprcv2_enhanced</code> / <code>hprcv2_merged</code>).</li>
+        <li>The following assemblies are not available for downloading sequences: CN1, I002C, KOREF1, KSA001, and YAO (both haplotypes).</li>
+        <li>Use the <strong>gzip</strong> checkbox to shrink large multi-assembly extracts.</li>
+        <li>Intervals in the <strong>Unavailable</strong> tab span multiple contigs and are omitted from FASTA output.</li>
+      </ul>
+    </div>
+  </details>
 
   <p id="status">Loading Pyodide…</p>
   <p id="substatus"></p>
+  <div id="fastaProgress" hidden aria-live="polite">
+    <div id="fastaProgressTrack" aria-hidden="true">
+      <div id="fastaProgressBar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+    </div>
+    <p id="fastaProgressText" class="hint mono" style="margin:0;"></p>
+  </div>
 
   <details id="seqDetails">
     <summary id="seqSummary" class="hint">Sequences: loading…</summary>
@@ -378,6 +432,14 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js"></script>
   <script type="module">
+    import {
+      isFastaDownloadSupported,
+      buildMultifasta,
+      triggerDownload,
+      fastaDownloadFilename,
+      setBgzfDecompressor,
+    } from "./fasta_download.js";
+
     const $ = (id) => document.getElementById(id);
     const THEME_KEY = "shredtools-theme";
     function getTheme() {
@@ -486,6 +548,28 @@ if "/" not in sys.path:
     sys.path.insert(0, "/")
     `);
     await pyodide.runPythonAsync("import app");
+
+    function bytesFromB64(b64) {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    setBgzfDecompressor(async (blockBytes) => {
+      pyodide.FS.writeFile("/bgzf_block.bin", blockBytes);
+      const b64 = await pyodide.runPythonAsync(`
+import base64, zlib
+with open("/bgzf_block.bin", "rb") as f:
+    block = f.read()
+xlen = block[10] | (block[11] << 8)
+raw = block[12 + xlen : len(block) - 8]
+data = zlib.decompressobj(-15).decompress(raw)
+base64.b64encode(data).decode()
+      `);
+      return bytesFromB64(b64);
+    });
+
     const jRes = await fetch(new URL("pangenome_lengths.json", base));
     if (!jRes.ok) {
       throw new Error(
@@ -505,6 +589,9 @@ if "/" not in sys.path:
     let lastRows = null;
     let lastMeta = null;
     let lastUnavailable = null;
+    let lastFastaBlob = null;
+    let lastFastaFilename = "extract.fa";
+    let lastFastaGzip = false;
     let geneIndex = null; // { [gene: string]: Array<{contig,start,end,label}> }
     let pangenomeList = null;
     /** Lengths: ``pangenome_lengths.json`` → MEMFS → ``app.load_lengths_bundle_path``. */
@@ -543,6 +630,61 @@ if "/" not in sys.path:
       const btn = $("plotBtn");
       btn.classList.toggle("visible", !!show);
       btn.disabled = !show;
+    }
+
+    function showFastaDownloadButton(show) {
+      const btn = $("fastaDownloadBtn");
+      const gzipWrap = $("fastaGzipWrap");
+      const gzipCb = $("fastaGzip");
+      const supported = isFastaDownloadSupported($("pangenome").value);
+      const visible = !!show && supported;
+      btn.classList.toggle("visible", visible);
+      btn.disabled = !visible;
+      gzipWrap.classList.toggle("visible", visible);
+      gzipCb.disabled = !visible;
+      btn.title = supported
+        ? ""
+        : "FASTA download is available for HPRCr2 pangenomes only.";
+    }
+
+    function refreshFastaDownloadButton() {
+      showFastaDownloadButton(!!lastRows?.length);
+    }
+
+    function clearFastaSave() {
+      lastFastaBlob = null;
+      lastFastaGzip = false;
+      setFastaProgress(false);
+      const saveBtn = $("fastaSaveBtn");
+      saveBtn.textContent = "Save FASTA";
+      saveBtn.classList.remove("visible");
+      saveBtn.disabled = true;
+    }
+
+    function showFastaSaveButton(show) {
+      const btn = $("fastaSaveBtn");
+      btn.textContent = lastFastaGzip ? "Save FASTA.gz" : "Save FASTA";
+      btn.classList.toggle("visible", !!show);
+      btn.disabled = !show || !lastFastaBlob;
+    }
+
+    function setFastaProgress(on, done = 0, total = 0, label = "", phase = "fetch") {
+      const wrap = $("fastaProgress");
+      const bar = $("fastaProgressBar");
+      const text = $("fastaProgressText");
+      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      wrap.classList.toggle("visible", !!on);
+      wrap.hidden = !on;
+      bar.style.width = `${pct}%`;
+      bar.setAttribute("aria-valuenow", String(pct));
+      if (!on) {
+        text.textContent = "";
+        return;
+      }
+      const phaseLabel =
+        phase === "write" ? "Writing" : phase === "start" ? "Loading" : "Fetching";
+      const detail = label ? ` ${label}` : "";
+      text.textContent = `${phaseLabel} ${done}/${total} (${pct}%)${detail}`;
     }
 
     function showPlotDownload(show) {
@@ -1315,6 +1457,10 @@ if "/" not in sys.path:
       renderIntervalsTable([]);
       renderUnavailableTable([]);
       renderLengthsView([]);
+      showPlotButton(false);
+      showFastaDownloadButton(false);
+      clearFastaSave();
+      clearSyntenyPlot();
       try {
         await loadPangenomeAndInitUI(key);
         status("Pangenome switched.", `elapsed ${secs()}`);
@@ -1420,6 +1566,8 @@ await app.warm_index(${seqIdx})
       $("out").value = "";
       $("bounds").textContent = "";
       showPlotButton(false);
+      showFastaDownloadButton(false);
+      clearFastaSave();
       clearSyntenyPlot();
       lastRows = null;
       renderIntervalsTable([]);
@@ -1437,6 +1585,8 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
           status("Could not run query.", result.error);
           $("out").value = "";
           showPlotButton(false);
+          showFastaDownloadButton(false);
+          clearFastaSave();
           clearSyntenyPlot();
           renderIntervalsTable([]);
           renderUnavailableTable([]);
@@ -1466,6 +1616,8 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
         $("bounds").textContent = b.join(" | ");
         status("Done.", `query ${secs(q0)}${mumSliceSummary ? ` | ${mumSliceSummary}` : ""}`);
         showPlotButton(true);
+        showFastaDownloadButton(true);
+        clearFastaSave();
         clearSyntenyPlot();
         setActiveTab("table");
       } catch (err) {
@@ -1474,6 +1626,8 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
         status("Error", msg);
         $("out").value = "";
         showPlotButton(false);
+        showFastaDownloadButton(false);
+        clearFastaSave();
         clearSyntenyPlot();
         renderIntervalsTable([]);
         renderUnavailableTable([]);
@@ -1481,6 +1635,66 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
         lastMeta = null;
         lastUnavailable = null;
         renderLengthsView([]);
+      }
+    });
+
+    $("fastaSaveBtn").addEventListener("click", () => {
+      if (!lastFastaBlob) return;
+      triggerDownload(lastFastaBlob, lastFastaFilename);
+      status("FASTA saved.", lastFastaFilename);
+    });
+
+    $("fastaDownloadBtn").addEventListener("click", async () => {
+      const rows = getFilteredRows();
+      if (!rows.length) {
+        status("Nothing to download.", "Select at least one assembly with results.");
+        return;
+      }
+      const btn = $("fastaDownloadBtn");
+      const runBtn = $("run");
+      const gzipCb = $("fastaGzip");
+      btn.disabled = true;
+      runBtn.disabled = true;
+      gzipCb.disabled = true;
+      const useGzip = gzipCb.checked;
+      const q0 = performance.now();
+      setFastaProgress(true, 0, rows.length, "", "start");
+      status("Building FASTA…", `0/${rows.length}`);
+      try {
+        const { file, written, skipped, mode, gzip } = await buildMultifasta(rows, {
+          gzip: useGzip,
+          onProgress({ done, total, label, phase }) {
+            setFastaProgress(true, done, total, label, phase);
+            const phaseLabel = phase === "write" ? "Writing" : "Fetching";
+            status("Building FASTA…", `${phaseLabel} ${done}/${total}${label ? `: ${label}` : ""}`);
+          },
+        });
+        setFastaProgress(false);
+        if (!written) {
+          const detail = skipped.map((s) => `${s.label}: ${s.reason}`).join("; ");
+          status("FASTA build failed.", detail || "No sequences fetched.");
+          return;
+        }
+        clearFastaSave();
+        lastFastaGzip = !!gzip;
+        const mime = lastFastaGzip ? "application/gzip" : "text/plain";
+        lastFastaBlob = file instanceof Blob ? file : new Blob([file], { type: mime });
+        lastFastaFilename = fastaDownloadFilename(lastMeta?.bounds, lastFastaGzip);
+        showFastaSaveButton(true);
+        const fmt = lastFastaGzip ? "FASTA.gz" : "FASTA";
+        let sub = `Built ${written} sequence${written === 1 ? "" : "s"} (${mode}${lastFastaGzip ? ", gzip" : ""}) in ${secs(q0)} — click Save ${fmt}`;
+        if (skipped.length) {
+          sub += ` | skipped ${skipped.length}: ${skipped.map((s) => s.label).join(", ")}`;
+        }
+        status("FASTA ready.", sub);
+      } catch (err) {
+        console.error(err);
+        setFastaProgress(false);
+        status("FASTA download error", err?.message ?? String(err));
+      } finally {
+        btn.disabled = false;
+        runBtn.disabled = false;
+        refreshFastaDownloadButton();
       }
     });
 
