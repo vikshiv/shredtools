@@ -60,6 +60,7 @@ def _build_intro() -> str:
         collapsed.append(f"  - [`{stem}.bumbl.bi`]({p['bi']})")
         collapsed.append(f"  - [`{stem}.lengths`]({p['lengths']})")
 
+    collapsed.append("")
     collapsed.append(
         f"FASTA sequences are pulled directly from HPRC hosted assemblies "
         f"([`s3://human-pangenomics/`]({_S3_HPRC_ASSEMBLIES}))."
