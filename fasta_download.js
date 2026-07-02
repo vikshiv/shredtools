@@ -33,6 +33,19 @@ const FETCH_RETRIES = 3;
 let inflightFetches = 0;
 const fetchWaiters = [];
 
+/** @type {AbortSignal | null} */
+let activeBuildAbortSignal = null;
+
+function checkBuildAborted() {
+  if (activeBuildAbortSignal?.aborted) {
+    throw new DOMException("FASTA build cancelled", "AbortError");
+  }
+}
+
+export function isFastaBuildCancelled(err) {
+  return err?.name === "AbortError";
+}
+
 function acquireFetchSlot() {
   if (inflightFetches < MAX_INFLIGHT_FETCHES) {
     inflightFetches++;
@@ -73,8 +86,10 @@ async function withRetries(label, fn) {
   let lastErr;
   for (let attempt = 0; attempt < FETCH_RETRIES; attempt++) {
     try {
+      checkBuildAborted();
       return await fn();
     } catch (err) {
+      if (err?.name === "AbortError") throw err;
       lastErr = err;
       if (!isRetryableFetchError(err) || attempt + 1 >= FETCH_RETRIES) break;
       await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
@@ -146,8 +161,12 @@ function parseCsvLine(line) {
 }
 
 async function defaultFetchBytes(url, start, end) {
+  checkBuildAborted();
   const headers = start != null && end != null ? { Range: `bytes=${start}-${end}` } : undefined;
-  const resp = await fetch(url, headers ? { headers } : undefined);
+  const resp = await fetch(url, {
+    headers,
+    signal: activeBuildAbortSignal ?? undefined,
+  });
   if (resp.status !== 200 && resp.status !== 206) {
     throw new Error(`HTTP ${resp.status}`);
   }
@@ -484,100 +503,128 @@ async function createOutputWriter(opts = {}) {
   };
 }
 
-async function runPool(items, worker, concurrency, onItemDone) {
+async function runPool(items, worker, concurrency, onItemDone, signal) {
   const results = new Array(items.length);
   let next = 0;
   async function runOne() {
-    while (true) {
+    while (!signal?.aborted) {
       const i = next++;
       if (i >= items.length) return;
-      results[i] = await worker(items[i], i);
-      if (onItemDone) onItemDone(results[i], i);
+      try {
+        results[i] = await worker(items[i], i);
+        if (onItemDone) onItemDone(results[i], i);
+      } catch (err) {
+        if (err?.name === "AbortError") return;
+        throw err;
+      }
     }
   }
   const n = Math.min(concurrency, items.length);
   await Promise.all(Array.from({ length: n }, runOne));
+  if (signal?.aborted) {
+    throw new DOMException("FASTA build cancelled", "AbortError");
+  }
   return results;
 }
 
 /**
  * Build a multi-FASTA file from BED rows.
  * @param {Array<{contig: string, start: number, end: number}>} rows
- * @param {{ concurrency?: number, gzip?: boolean, onProgress?: (info: {done: number, total: number, label: string, phase: string}) => void }} opts
+ * @param {{ concurrency?: number, gzip?: boolean, signal?: AbortSignal, onProgress?: (info: {done: number, total: number, label: string, phase: string}) => void }} opts
  */
 export async function buildMultifasta(rows, opts = {}) {
   const onProgress = opts.onProgress ?? (() => {});
   const concurrency = opts.concurrency ?? 6;
   const gzip = !!opts.gzip;
-  const index = await loadAssemblyIndex();
-  onProgress({ done: 0, total: rows.length, label: "assembly index", phase: "start" });
-  const writer = await createOutputWriter({ gzip });
-  const skipped = [];
-  let written = 0;
-  let fetched = 0;
+  const signal = opts.signal ?? null;
+  activeBuildAbortSignal = signal;
+  let writer = null;
+  try {
+    checkBuildAborted();
+    const index = await loadAssemblyIndex();
+    onProgress({ done: 0, total: rows.length, label: "assembly index", phase: "start" });
+    writer = await createOutputWriter({ gzip });
+    const skipped = [];
+    let written = 0;
+    let fetched = 0;
 
-  const results = await runPool(
-    rows,
-    async (row) => {
-      const key = parseContigKey(row.contig);
-      if (!key) {
-        return { ok: false, label: row.contig, reason: "invalid contig name" };
+    const results = await runPool(
+      rows,
+      async (row) => {
+        checkBuildAborted();
+        const key = parseContigKey(row.contig);
+        if (!key) {
+          return { ok: false, label: row.contig, reason: "invalid contig name" };
+        }
+        const entry = index.get(indexKey(key.sampleId, key.hap));
+        if (!entry) {
+          return {
+            ok: false,
+            label: `${key.sampleId}_hap${key.hap}`,
+            reason: "not in Release 2 assembly index",
+          };
+        }
+        try {
+          const seq = await fetchSubsequence(entry, row.contig, row.start, row.end);
+          return {
+            ok: true,
+            label: `${key.sampleId}_hap${key.hap}`,
+            text: formatFastaRecord(row.contig, row.start, row.end, seq),
+          };
+        } catch (err) {
+          if (err?.name === "AbortError") throw err;
+          return {
+            ok: false,
+            label: `${key.sampleId}_hap${key.hap}`,
+            reason: err?.message ?? String(err),
+          };
+        }
+      },
+      concurrency,
+      (result) => {
+        fetched++;
+        onProgress({
+          done: fetched,
+          total: rows.length,
+          label: result.label,
+          phase: "fetch",
+        });
+      },
+      signal
+    );
+
+    checkBuildAborted();
+    onProgress({ done: 0, total: rows.length, label: "", phase: "write" });
+    for (let i = 0; i < results.length; i++) {
+      checkBuildAborted();
+      const r = results[i];
+      if (!r) continue;
+      if (r.ok) {
+        await writer.append(r.text);
+        written++;
+      } else {
+        skipped.push({ label: r.label, reason: r.reason });
       }
-      const entry = index.get(indexKey(key.sampleId, key.hap));
-      if (!entry) {
-        return {
-          ok: false,
-          label: `${key.sampleId}_hap${key.hap}`,
-          reason: "not in Release 2 assembly index",
-        };
-      }
-      try {
-        const seq = await fetchSubsequence(entry, row.contig, row.start, row.end);
-        return {
-          ok: true,
-          label: `${key.sampleId}_hap${key.hap}`,
-          text: formatFastaRecord(row.contig, row.start, row.end, seq),
-        };
-      } catch (err) {
-        return {
-          ok: false,
-          label: `${key.sampleId}_hap${key.hap}`,
-          reason: err?.message ?? String(err),
-        };
-      }
-    },
-    concurrency,
-    (result) => {
-      fetched++;
       onProgress({
-        done: fetched,
+        done: i + 1,
         total: rows.length,
-        label: result.label,
-        phase: "fetch",
+        label: r.label,
+        phase: "write",
       });
     }
-  );
 
-  onProgress({ done: 0, total: rows.length, label: "", phase: "write" });
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i];
-    if (r.ok) {
-      await writer.append(r.text);
-      written++;
-    } else {
-      skipped.push({ label: r.label, reason: r.reason });
+    checkBuildAborted();
+    const outputMode = writer.mode;
+    const file = await writer.finish();
+    await writer.cleanup();
+    writer = null;
+    return { file, written, skipped, mode: outputMode, gzip };
+  } finally {
+    activeBuildAbortSignal = null;
+    if (signal?.aborted && writer) {
+      await writer.cleanup();
     }
-    onProgress({
-      done: i + 1,
-      total: rows.length,
-      label: r.label,
-      phase: "write",
-    });
   }
-
-  const file = await writer.finish();
-  await writer.cleanup();
-  return { file, written, skipped, mode: writer.mode, gzip };
 }
 
 export function triggerDownload(file, filename) {

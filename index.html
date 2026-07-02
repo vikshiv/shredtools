@@ -178,6 +178,8 @@
     #fastaDownloadBtn.visible { display: inline-block; }
     #fastaSaveBtn { display: none; }
     #fastaSaveBtn.visible { display: inline-block; }
+    #fastaCancelBtn { display: none; }
+    #fastaCancelBtn.visible { display: inline-block; }
     #fastaGzipWrap { display: none; align-items: center; gap: 0.35rem; margin: 0; }
     #fastaGzipWrap.visible { display: inline-flex; }
     #plotDownloadBtn { display: none; }
@@ -328,6 +330,7 @@
     <button type="button" id="run" disabled>Run</button>
     <button type="button" id="plotBtn" disabled>Plot</button>
     <button type="button" id="fastaDownloadBtn" disabled>Build FASTA</button>
+    <button type="button" id="fastaCancelBtn" hidden>Cancel</button>
     <label id="fastaGzipWrap" class="hint" for="fastaGzip">
       <input type="checkbox" id="fastaGzip" />
       gzip
@@ -363,8 +366,8 @@
   <details id="seqDetails">
     <summary id="seqSummary" class="hint">Sequences: loading…</summary>
     <div class="row" style="margin-top:0.5rem;">
-      <button type="button" id="seqAll">Show all</button>
-      <button type="button" id="seqNone">Hide all</button>
+      <button type="button" id="seqAll">Select all</button>
+      <button type="button" id="seqNone">Deselect all</button>
       <input type="text" id="seqFilter" placeholder="filter (e.g. HG002)" style="flex:1 1 12rem; min-width: 12rem;" />
     </div>
     <div id="seqList" class="seq-list"></div>
@@ -434,6 +437,7 @@
   <script type="module">
     import {
       isFastaDownloadSupported,
+      isFastaBuildCancelled,
       buildMultifasta,
       triggerDownload,
       fastaDownloadFilename,
@@ -666,6 +670,15 @@ base64.b64encode(data).decode()
       btn.textContent = lastFastaGzip ? "Save FASTA.gz" : "Save FASTA";
       btn.classList.toggle("visible", !!show);
       btn.disabled = !show || !lastFastaBlob;
+    }
+
+    let fastaBuildAbort = null;
+
+    function showFastaCancelButton(show) {
+      const btn = $("fastaCancelBtn");
+      btn.classList.toggle("visible", !!show);
+      btn.hidden = !show;
+      btn.disabled = !show;
     }
 
     function setFastaProgress(on, done = 0, total = 0, label = "", phase = "fetch") {
@@ -1017,6 +1030,21 @@ base64.b64encode(data).decode()
     function clearGeneIfUserEdit() {
       if (suppressGeneClear) return;
       if ($("geneQuery").value) $("geneQuery").value = "";
+    }
+
+    function clearIntervalFieldsIfGeneEdit() {
+      if (suppressGeneClear) return;
+      suppressRegionSync = true;
+      try {
+        $("region").value = "";
+        $("start").value = "";
+        $("end").value = "";
+      } finally {
+        queueMicrotask(() => {
+          suppressRegionSync = false;
+          refreshRegionValidation();
+        });
+      }
     }
 
     function setGeneStatus(msg) {
@@ -1522,6 +1550,11 @@ await app.warm_index(${seqIdx})
       await loadGeneIndexForBuild(build);
     });
 
+    $("geneQuery").addEventListener("input", () => {
+      if (!manifest) return;
+      clearIntervalFieldsIfGeneEdit();
+    });
+
     $("geneQuery").addEventListener("change", () => {
       if (!manifest) return;
       applyGene($("geneQuery").value);
@@ -1644,6 +1677,12 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
       status("FASTA saved.", lastFastaFilename);
     });
 
+    $("fastaCancelBtn").addEventListener("click", () => {
+      if (!fastaBuildAbort) return;
+      fastaBuildAbort.abort();
+      status("Cancelling FASTA build…", "");
+    });
+
     $("fastaDownloadBtn").addEventListener("click", async () => {
       const rows = getFilteredRows();
       if (!rows.length) {
@@ -1658,11 +1697,14 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
       gzipCb.disabled = true;
       const useGzip = gzipCb.checked;
       const q0 = performance.now();
+      fastaBuildAbort = new AbortController();
+      showFastaCancelButton(true);
       setFastaProgress(true, 0, rows.length, "", "start");
       status("Building FASTA…", `0/${rows.length}`);
       try {
         const { file, written, skipped, mode, gzip } = await buildMultifasta(rows, {
           gzip: useGzip,
+          signal: fastaBuildAbort.signal,
           onProgress({ done, total, label, phase }) {
             setFastaProgress(true, done, total, label, phase);
             const phaseLabel = phase === "write" ? "Writing" : "Fetching";
@@ -1690,8 +1732,14 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
       } catch (err) {
         console.error(err);
         setFastaProgress(false);
-        status("FASTA download error", err?.message ?? String(err));
+        if (isFastaBuildCancelled(err)) {
+          status("FASTA build cancelled.", "");
+        } else {
+          status("FASTA download error", err?.message ?? String(err));
+        }
       } finally {
+        showFastaCancelButton(false);
+        fastaBuildAbort = null;
         btn.disabled = false;
         runBtn.disabled = false;
         refreshFastaDownloadButton();
