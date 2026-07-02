@@ -7,6 +7,7 @@ from bisect import bisect_right
 import bumbl_index_utils as sutils
 
 _S3_MUMEMTO = "https://genome-idx.s3.amazonaws.com/mumemto"
+_S3_HPRC_ASSEMBLIES = "https://human-pangenomics.s3.us-west-2.amazonaws.com/"
 
 # Each preset: .bumbl, .bumbl.bi, and .lengths on S3. Contig/length metadata for the browser
 # also lives in ``pangenome_lengths.json`` (built with ``lengths_to_json.py``).
@@ -58,6 +59,11 @@ def _build_intro() -> str:
         collapsed.append(f"  - [`{stem}.bumbl`]({p['bumbl']})")
         collapsed.append(f"  - [`{stem}.bumbl.bi`]({p['bi']})")
         collapsed.append(f"  - [`{stem}.lengths`]({p['lengths']})")
+
+    collapsed.append(
+        f"FASTA sequences are pulled directly from HPRC hosted assemblies "
+        f"([`s3://human-pangenomics/`]({_S3_HPRC_ASSEMBLIES}))."
+    )
 
     visible = [
         "We use two different datasets from the Human Pangenome Reference Consortium (HPRC). "
