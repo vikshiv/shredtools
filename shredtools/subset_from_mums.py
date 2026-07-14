@@ -11,7 +11,8 @@ from shredtools import utils as sutils
 
 def parse_arguments(args=None):
     parser = argparse.ArgumentParser(
-        description="Subset multi-MUM rows overlapping a query region on one assembly."    )
+        description="Subset multi-MUM rows overlapping a query region on one assembly."
+    )
     parser.add_argument(
         "mum_file",
         type=str,
@@ -57,6 +58,12 @@ def parse_arguments(args=None):
         "-b",
         dest="bi",
         help="Path or URL to bumbl index (default: <mum_file>.bi)",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Print progress messages to stderr.",
     )
 
     args = parser.parse_args(args)
@@ -131,23 +138,26 @@ def main(args=None):
             subset = _empty_mumdata(num_seqs)
         else:
             mums = sutils.parse_bumbl_range(args.mum_file, ranges)
-            print(f"loaded {len(mums)} candidate MUM rows from index", file=sys.stderr)
             subset = filter_mums_in_region(
                 mums, args.seq_idx, region_start, region_end_excl
             )
             subset.sort(args.seq_idx)
 
-        print(f"kept {len(subset)} MUM rows overlapping {args.range}", file=sys.stderr)
-
         out_fmt = _resolve_output_format(args)
         dest = _resolve_output_dest(args)
+        log_progress = args.verbose or (args.output is not None and args.output != "-")
+
+        if log_progress and ranges is not None:
+            print(f"loaded {len(mums)} candidate MUM rows from index", file=sys.stderr)
+        if log_progress:
+            print(f"kept {len(subset)} MUM rows overlapping {args.range}", file=sys.stderr)
 
         if out_fmt == "mums":
             subset.write_mums(dest, blocks=None)
         else:
             subset.write_bums(dest, blocks=None)
 
-        if dest != "/dev/stdout":
+        if log_progress and dest != "/dev/stdout":
             print(f"wrote {len(subset)} MUM rows to {dest}", file=sys.stderr)
 
 
