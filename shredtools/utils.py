@@ -461,6 +461,21 @@ class BumblSingleIndex:
         return coord // self.bin_width
 
 
+def get_mum_ranges_region(index, coords):
+    """
+    Return row ranges for every bin overlapping ``coords`` on the indexed sequence.
+
+    ``coords`` is ``(start, end)`` with inclusive global end, as returned by
+    :func:`convert_local_to_global_coords`.
+    """
+    s, e = coords
+    bin_start = index.coord_to_bin(s)
+    bin_end = index.coord_to_bin(e)
+    if bin_start > index.max_bin or bin_end > index.max_bin:
+        return None
+    return index.get_bins((bin_start, bin_end))
+
+
 def _url_size(url):
     req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
     try:

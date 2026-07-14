@@ -13,6 +13,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "index": ("shredtools.index_bumbl", "main"),
     "shred": ("shredtools.shred_from_mums", "main"),
     "sort": ("shredtools.sort_bumbl", "main"),
+    "subset": ("shredtools.subset_from_mums", "main"),
     "enhance": ("shredtools.enhance", "main"),
     "stats": ("shredtools.stats", "main"),
 }
