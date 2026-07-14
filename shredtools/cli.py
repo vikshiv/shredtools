@@ -6,21 +6,59 @@ from __future__ import annotations
 import importlib
 import sys
 
-COMMANDS: dict[str, tuple[str, str]] = {
-    "extract": ("shredtools.extract_from_mums", "main"),
-    "fasta": ("shredtools.extract_fastas", "main"),
-    "filter": ("shredtools.filter_collinear", "main"),
-    "index": ("shredtools.index_bumbl", "main"),
-    "shred": ("shredtools.shred_from_mums", "main"),
-    "sort": ("shredtools.sort_bumbl", "main"),
-    "subset": ("shredtools.subset_from_mums", "main"),
-    "enhance": ("shredtools.enhance", "main"),
-    "stats": ("shredtools.stats", "main"),
+COMMANDS: dict[str, tuple[str, str, str]] = {
+    "enhance": (
+        "shredtools.enhance",
+        "main",
+        "Enhance multi-MUM collection by finding local MUMs in gaps between collinear global MUMs.",
+    ),
+    "extract": (
+        "shredtools.extract_from_mums",
+        "main",
+        "Extract syntenic regions from a query interval (BED).",
+    ),
+    "fasta": (
+        "shredtools.extract_fastas",
+        "main",
+        "Extract FASTA regions from a BED file produced by extract_from_mums.",
+    ),
+    "filter": (
+        "shredtools.filter_collinear",
+        "main",
+        "Filter out non-collinear MUMs.",
+    ),
+    "index": (
+        "shredtools.index_bumbl",
+        "main",
+        "Verify bumbl row order and write a .bumbl.bi index (single or multi).",
+    ),
+    "shred": (
+        "shredtools.shred_from_mums",
+        "main",
+        "Shred a MUM file into smaller fragments and optionally visualize.",
+    ),
+    "sort": (
+        "shredtools.sort_bumbl",
+        "main",
+        "Sort a .bumbl file by start position and write output.",
+    ),
+    "stats": (
+        "shredtools.stats",
+        "main",
+        "Report header metadata and associated files for a .mums or .bumbl file.",
+    ),
+    "subset": (
+        "shredtools.subset_from_mums",
+        "main",
+        "Subset multi-MUM rows overlapping a query region on one assembly.",
+    ),
 }
 
 __version__ = "0.1.0"
 
-_COMMAND_HELP = "\n".join(f"  {name:8}  {mod.rsplit('.', 1)[-1]}" for name, (mod, _) in sorted(COMMANDS.items()))
+_COMMAND_HELP = "\n".join(
+    f"  {name:8}  {desc}" for name, (_, _, desc) in sorted(COMMANDS.items())
+)
 
 
 def _print_top_level_help() -> None:
@@ -61,7 +99,7 @@ def main(argv: list[str] | None = None) -> None:
         _print_top_level_help()
         raise SystemExit(1)
 
-    module_name, attr = spec
+    module_name, attr, _ = spec
     module = importlib.import_module(module_name)
     entry = getattr(module, attr)
 
