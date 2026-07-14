@@ -11,9 +11,7 @@ from shredtools import utils as sutils
 
 def parse_arguments(args=None):
     parser = argparse.ArgumentParser(
-        description="Subset multi-MUM rows overlapping a query region on one assembly."
-        "Currently returns any MUMs wholly contained in the region, that is, the start of the MUM is >= region_start and the end of the MUM is < region_end_excl."
-    )
+        description="Subset multi-MUM rows overlapping a query region on one assembly."    )
     parser.add_argument(
         "mum_file",
         type=str,
