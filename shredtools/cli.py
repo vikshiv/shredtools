@@ -4,7 +4,18 @@
 from __future__ import annotations
 
 import importlib
+import os
+import signal
 import sys
+
+# When stdout is closed early (e.g. `| less` then quit), exit cleanly instead
+# of raising BrokenPipeError. Python ignores SIGPIPE by default, which turns
+# closed-pipe writes into exceptions; restoring SIG_DFL matches typical Unix CLI
+# behavior (no traceback).
+try:
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+except (AttributeError, ValueError):
+    pass
 
 COMMANDS: dict[str, tuple[str, str, str]] = {
     "enhance": (
@@ -15,12 +26,12 @@ COMMANDS: dict[str, tuple[str, str, str]] = {
     "extract": (
         "shredtools.extract_from_mums",
         "main",
-        "Extract syntenic regions from a query interval (BED).",
+        "Extract syntenic regions given a query interval from any assembly in the collection using multi-MUMs.",
     ),
     "fasta": (
         "shredtools.extract_fastas",
         "main",
-        "Extract FASTA regions from a BED file produced by extract_from_mums.",
+        "Extract FASTA regions from a BED file produced by shredtools extract.",
     ),
     "filter": (
         "shredtools.filter_collinear",
@@ -30,7 +41,7 @@ COMMANDS: dict[str, tuple[str, str, str]] = {
     "index": (
         "shredtools.index_bumbl",
         "main",
-        "Verify bumbl row order and write a .bumbl.bi index (single or multi).",
+        "Write a .bumbl.bi index for a .bumbl file (single or multi), optionally verifying row order.",
     ),
     "shred": (
         "shredtools.shred_from_mums",
@@ -50,7 +61,7 @@ COMMANDS: dict[str, tuple[str, str, str]] = {
     "subset": (
         "shredtools.subset_from_mums",
         "main",
-        "Subset multi-MUM rows overlapping a query region on one assembly.",
+        "Subset to only multi-MUM rows contained in a query region from a specific assembly.",
     ),
 }
 
@@ -74,7 +85,28 @@ def _print_top_level_help() -> None:
     print("Version:", __version__)
 
 
+def _exit_on_broken_pipe() -> None:
+    """Avoid flush errors during interpreter shutdown after stdout closes."""
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        pass
+    try:
+        fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(fd, sys.stdout.fileno())
+    except OSError:
+        pass
+    raise SystemExit(0)
+
+
 def main(argv: list[str] | None = None) -> None:
+    try:
+        _run(argv)
+    except BrokenPipeError:
+        _exit_on_broken_pipe()
+
+
+def _run(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
 
