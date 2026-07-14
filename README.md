@@ -54,7 +54,7 @@ shredtools fasta regions/prefix.bed -o fasta_out/
 
 ### Index a `.bumbl` file
 
-`extract` and `subset` on a `.bumbl` input require a `.bumbl.bi` index alongside it. The index maps genomic bins to row ranges in the `.bumbl` file so only subsets of MUMs are loaded at a time. For remote queries, the `.bumbl` and `.bumbl.bi` paths can be HTTP(S) URLs (the server must support byte-range requests); the `.lengths` file must be local.
+`extract` and `subset` on a `.bumbl` input require a `.bumbl.bi` index alongside it. The index maps genomic bins to row ranges in the `.bumbl` file so only subsets of MUMs are loaded at a time. For remote queries, `.bumbl`, `.bumbl.bi`, and `.lengths` can all be HTTP(S) URLs when co-hosted in the same directory (auto-detected from the `.bumbl` path). The `.bumbl` and `.bumbl.bi` files require byte-range HTTP support; `.lengths` is fetched with a plain GET.
 
 **Prerequisites**
 
@@ -98,15 +98,14 @@ For the full index specifications, see **[bumbl_index/bumbl_index.md](bumbl_inde
 
 ### Subset MUM rows in a region
 
-With a `.bumbl.bi` index, `subset` loads only the multi-MUM rows overlapping a query interval on one assembly (same `-s` / `-r` as `extract`). Writes `.mums` to stdout by default, or `.bumbl` with `-o`. The input `.bumbl` and `-b` index can be HTTP(S) URLs (byte-range requests); `-l` must be a local `.lengths` file.
+With a `.bumbl.bi` index, `subset` loads only the multi-MUM rows overlapping a query interval on one assembly (same `-s` / `-r` as `extract`). Writes `.mums` to stdout by default, or `.bumbl` with `-o`. The input `.bumbl`, index (`-b`), and lengths (`-l`) can be local paths or HTTP(S) URLs; when all three are co-hosted, only the `.bumbl` URL is required.
 
 ```bash
 shredtools subset pangenome.coll.bumbl -s 0 -r chr1:1000000-2000000 -l pangenome.lengths > region.mums
 shredtools subset pangenome.coll.bumbl -s 0 -r chr1:1000000-2000000 -o region.bumbl
 
-# Remote .bumbl and index
-shredtools subset https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000 \
-  -b https://url/to/pangenome.bumbl.bi -l pangenome.lengths
+# Remote .bumbl only (auto-detects .bumbl.bi and .lengths in the same directory)
+shredtools subset https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000
 ```
 
 ---
@@ -120,9 +119,9 @@ Given a query interval on one pangenome sequence, `extract` finds the bounding m
 
 | File                 | Description                                                      |
 | -------------------- | ---------------------------------------------------------------- |
-| `pangenome.bumbl`    | Positional argument, can be a remote file url                    |
-| `pangenome.bumbl.bi` | Default: `<mum_file>.bi`, or `-b`                                |
-| `pangenome.lengths`  | Default: `<stem>.lengths`, or `-l` (mumemto multilengths format) |
+| `pangenome.bumbl`    | Positional argument; local path or HTTP(S) URL                     |
+| `pangenome.bumbl.bi` | Default: `<mum_file>.bi`, or `-b`; local path or HTTP(S) URL     |
+| `pangenome.lengths`  | Default: `<stem>.lengths`, or `-l`; local path or HTTP(S) URL (mumemto multilengths format) |
 
 
 **Region format.** `--range` is **contig-local** on the sequence named by `-s`: `contig:start-end` (e.g. `chr1:1000000-2000000`).
@@ -157,9 +156,8 @@ shredtools extract pangenome.coll.bumbl -s 0 -r chr1:1-50000 -x 0 1 2
 shredtools extract pangenome.coll.bumbl -s 0 -r chr1:1000000-2000000 \
   -o regions/prefix -l pangenome.lengths --plot
 
-# Remote .bumbl and index (HTTP range requests)
-shredtools extract https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000 \
-  -b https://url/to/pangenome.bumbl.bi -l pangenome.lengths
+# Remote .bumbl only (auto-detects .bumbl.bi and .lengths in the same directory)
+shredtools extract https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000
 ```
 
 When the query interval does not align exactly to MUM boundaries, `extract` prints `left margin` and/or `right margin` on stderr (distance in bp from the query edge to the enclosing MUM). This serves as a guide for the bounding region around the extracted regions.

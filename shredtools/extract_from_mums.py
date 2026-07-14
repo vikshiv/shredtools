@@ -21,35 +21,11 @@ def parse_arguments(args=None):
     parser.add_argument("--plot-full", action="store_true", help="If set, generate a visualization of the extracted region using all MUMs from MUM file.")
     parser.add_argument("--output", '-o', type=str, default=None, help="Output prefix for .bed and plot PDFs (BED to stdout if omitted)")
     parser.add_argument("--sequences", '-x', type=int, nargs='*', default=None, help="One or more sequence indices to output BED for. By default, all sequences are included.")
-    parser.add_argument('--lengths','-l', dest='lens', help='lengths file, first column is seq length in order of filelist')
+    parser.add_argument('--lengths','-l', dest='lens', help='Path or URL to lengths file (default: <stem>.lengths)')
     parser.add_argument('--bumblbi','-b', dest='bi', help='Path or URL to bumbl index (default: <mum_file>.bi)')
     
     args = parser.parse_args(args)
-    
-    is_url = isinstance(args.mum_file, str) and (
-        args.mum_file.startswith("http://") or args.mum_file.startswith("https://")
-    )
-    if (not is_url) and (not os.path.exists(args.mum_file)):
-        print(f"MUM file {args.mum_file} not found", file=sys.stderr)
-        raise SystemExit(1)
-
-    if args.mum_file.endswith(".bumbl") and args.bi is None:
-        args.bi = args.mum_file + '.bi'
-        is_bi_url = isinstance(args.bi, str) and (
-            args.bi.startswith("http://") or args.bi.startswith("https://")
-        )
-        if (not is_bi_url) and (not os.path.exists(args.bi)):
-            print(
-                f"Bumbl index {args.bi} not found, and no bumbl index provided",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-            
-    if args.lens is None:
-        args.lens = os.path.splitext(args.mum_file)[0] + '.lengths'
-        if not os.path.exists(args.lens):
-            print(f"Lengths file {args.lens} not found, and no lengths file provided", file=sys.stderr)
-            raise SystemExit(1)
+    args.bi, args.lens = sutils.resolve_bumbl_sidecars(args.mum_file, args.bi, args.lens)
         
     if args.output is None and (args.plot_full or args.plot):
         print('Output prefix required for plotting.', file=sys.stderr)
@@ -257,36 +233,37 @@ def plot_full_synteny(args, coords, mums, mum_bounds, other_coords, seq_idx, seq
 
 def main(args=None):
     args = parse_arguments(args)
-    seq_lengths_multi = mutils.get_sequence_lengths(args.lens, multilengths=True)
-    seq_lengths = [sum(x) for x in seq_lengths_multi]
-    contig_names = mutils.get_contig_names(args.lens)
-    NUM_SEQS = len(seq_lengths)
-    if args.sequences is not None and any([s >= NUM_SEQS for s in args.sequences]):
-        print(f"Sequence index {max(args.sequences)} is invalid (N = {NUM_SEQS})", file=sys.stderr)
-        raise SystemExit(1)
-    if args.sequences is None:
-        args.sequences = list(range(NUM_SEQS))
-    coords = sutils.convert_local_to_global_coords(args.range, contig_names[args.seq_idx], seq_lengths_multi[args.seq_idx])
-    idx = sutils.parse_index(args.bi, seq_idx=args.seq_idx)
-    ranges = get_mum_ranges_flanks(idx, coords)
-    if ranges is None:
-        print(
-            f"No bounding MUMs found for region {args.range}.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+    with sutils.local_file(args.lens) as lens_path:
+        seq_lengths_multi = mutils.get_sequence_lengths(lens_path, multilengths=True)
+        seq_lengths = [sum(x) for x in seq_lengths_multi]
+        contig_names = mutils.get_contig_names(lens_path)
+        NUM_SEQS = len(seq_lengths)
+        if args.sequences is not None and any([s >= NUM_SEQS for s in args.sequences]):
+            print(f"Sequence index {max(args.sequences)} is invalid (N = {NUM_SEQS})", file=sys.stderr)
+            raise SystemExit(1)
+        if args.sequences is None:
+            args.sequences = list(range(NUM_SEQS))
+        coords = sutils.convert_local_to_global_coords(args.range, contig_names[args.seq_idx], seq_lengths_multi[args.seq_idx])
+        idx = sutils.parse_index(args.bi, seq_idx=args.seq_idx)
+        ranges = get_mum_ranges_flanks(idx, coords)
+        if ranges is None:
+            print(
+                f"No bounding MUMs found for region {args.range}.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
 
-    mums = sutils.parse_bumbl_range(args.mum_file, ranges)
-    mums.sort(args.seq_idx)
+        mums = sutils.parse_bumbl_range(args.mum_file, ranges)
+        mums.sort(args.seq_idx)
 
-    mum_bounds, other_coords = find_target_region(mums, coords, args.seq_idx, args.sequences)
-    if args.plot:
-        if not args.lens:
-            raise ValueError("--lengths-file is required when --plot is specified")
-        plot_extract(args, coords, mums, mum_bounds, other_coords, args.seq_idx, args.sequences, seq_lengths)
-    if args.plot_full:
-        plot_full_synteny(args, coords, mums, mum_bounds, other_coords, args.seq_idx, args.sequences, seq_lengths)
-    extract_bed(args.output, args.lens, contig_names, seq_lengths_multi, other_coords, args.sequences)
+        mum_bounds, other_coords = find_target_region(mums, coords, args.seq_idx, args.sequences)
+        if args.plot:
+            if not args.lens:
+                raise ValueError("--lengths-file is required when --plot is specified")
+            plot_extract(args, coords, mums, mum_bounds, other_coords, args.seq_idx, args.sequences, seq_lengths)
+        if args.plot_full:
+            plot_full_synteny(args, coords, mums, mum_bounds, other_coords, args.seq_idx, args.sequences, seq_lengths)
+        extract_bed(args.output, lens_path, contig_names, seq_lengths_multi, other_coords, args.sequences)
     
 
 if __name__ == "__main__":

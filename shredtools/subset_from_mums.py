@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import os
 import sys
 
 import numpy as np
@@ -52,7 +51,7 @@ def parse_arguments(args=None):
         "--lengths",
         "-l",
         dest="lens",
-        help="Lengths file, first column is seq length in order of filelist",
+        help="Path or URL to lengths file (default: <stem>.lengths)",
     )
     parser.add_argument(
         "--bumblbi",
@@ -62,34 +61,7 @@ def parse_arguments(args=None):
     )
 
     args = parser.parse_args(args)
-
-    is_url = isinstance(args.mum_file, str) and (
-        args.mum_file.startswith("http://") or args.mum_file.startswith("https://")
-    )
-    if (not is_url) and (not os.path.exists(args.mum_file)):
-        print(f"MUM file {args.mum_file} not found", file=sys.stderr)
-        raise SystemExit(1)
-
-    if args.mum_file.endswith(".bumbl") and args.bi is None:
-        args.bi = args.mum_file + ".bi"
-        is_bi_url = isinstance(args.bi, str) and (
-            args.bi.startswith("http://") or args.bi.startswith("https://")
-        )
-        if (not is_bi_url) and (not os.path.exists(args.bi)):
-            print(
-                f"Bumbl index {args.bi} not found, and no bumbl index provided",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-
-    if args.lens is None:
-        args.lens = os.path.splitext(args.mum_file)[0] + ".lengths"
-        if not os.path.exists(args.lens):
-            print(
-                f"Lengths file {args.lens} not found, and no lengths file provided",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
+    args.bi, args.lens = sutils.resolve_bumbl_sidecars(args.mum_file, args.bi, args.lens)
 
     return args
 
@@ -131,52 +103,53 @@ def _empty_mumdata(num_seqs: int) -> mutils.MUMdata:
 def main(args=None):
     args = parse_arguments(args)
 
-    seq_lengths_multi = mutils.get_sequence_lengths(args.lens, multilengths=True)
-    contig_names = mutils.get_contig_names(args.lens)
-    num_seqs = len(seq_lengths_multi)
-    if not (0 <= args.seq_idx < num_seqs):
-        print(
-            f"Sequence index {args.seq_idx} is invalid (N = {num_seqs})",
-            file=sys.stderr,
+    with sutils.local_file(args.lens) as lens_path:
+        seq_lengths_multi = mutils.get_sequence_lengths(lens_path, multilengths=True)
+        contig_names = mutils.get_contig_names(lens_path)
+        num_seqs = len(seq_lengths_multi)
+        if not (0 <= args.seq_idx < num_seqs):
+            print(
+                f"Sequence index {args.seq_idx} is invalid (N = {num_seqs})",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        coords = sutils.convert_local_to_global_coords(
+            args.range,
+            contig_names[args.seq_idx],
+            seq_lengths_multi[args.seq_idx],
         )
-        raise SystemExit(1)
+        region_start, region_end_incl = coords
+        region_end_excl = region_end_incl + 1
 
-    coords = sutils.convert_local_to_global_coords(
-        args.range,
-        contig_names[args.seq_idx],
-        seq_lengths_multi[args.seq_idx],
-    )
-    region_start, region_end_incl = coords
-    region_end_excl = region_end_incl + 1
+        idx = sutils.parse_index(args.bi, seq_idx=args.seq_idx)
+        ranges = sutils.get_mum_ranges_region(idx, coords)
+        if ranges is None:
+            print(
+                f"No indexed bins found for region {args.range}.",
+                file=sys.stderr,
+            )
+            subset = _empty_mumdata(num_seqs)
+        else:
+            mums = sutils.parse_bumbl_range(args.mum_file, ranges)
+            print(f"loaded {len(mums)} candidate MUM rows from index", file=sys.stderr)
+            subset = filter_mums_in_region(
+                mums, args.seq_idx, region_start, region_end_excl
+            )
+            subset.sort(args.seq_idx)
 
-    idx = sutils.parse_index(args.bi, seq_idx=args.seq_idx)
-    ranges = sutils.get_mum_ranges_region(idx, coords)
-    if ranges is None:
-        print(
-            f"No indexed bins found for region {args.range}.",
-            file=sys.stderr,
-        )
-        subset = _empty_mumdata(num_seqs)
-    else:
-        mums = sutils.parse_bumbl_range(args.mum_file, ranges)
-        print(f"loaded {len(mums)} candidate MUM rows from index", file=sys.stderr)
-        subset = filter_mums_in_region(
-            mums, args.seq_idx, region_start, region_end_excl
-        )
-        subset.sort(args.seq_idx)
+        print(f"kept {len(subset)} MUM rows overlapping {args.range}", file=sys.stderr)
 
-    print(f"kept {len(subset)} MUM rows overlapping {args.range}", file=sys.stderr)
+        out_fmt = _resolve_output_format(args)
+        dest = _resolve_output_dest(args)
 
-    out_fmt = _resolve_output_format(args)
-    dest = _resolve_output_dest(args)
+        if out_fmt == "mums":
+            subset.write_mums(dest, blocks=None)
+        else:
+            subset.write_bums(dest, blocks=None)
 
-    if out_fmt == "mums":
-        subset.write_mums(dest, blocks=None)
-    else:
-        subset.write_bums(dest, blocks=None)
-
-    if dest != "/dev/stdout":
-        print(f"wrote {len(subset)} MUM rows to {dest}", file=sys.stderr)
+        if dest != "/dev/stdout":
+            print(f"wrote {len(subset)} MUM rows to {dest}", file=sys.stderr)
 
 
 if __name__ == "__main__":
