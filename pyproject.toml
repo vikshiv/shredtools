@@ -9,7 +9,7 @@ description = "Utilities for manipulating the pangenome coordinate system with m
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "GPL-3.0-only" }
-authors = [{ name = "Vikram Shivakumar", email = "vshivak1@jhu.edu" }]
+authors = [{ name = "Vikram Shivakumar", email = "vs632@cam.ac.uk" }]
 dependencies = [
     "numpy",
     "pysam",
