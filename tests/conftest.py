@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_DATA = REPO_ROOT / "test_data"
 
 
-def test_data_dir() -> Path:
+def get_test_data_dir() -> Path:
     return Path(os.environ.get("SHREDTOOLS_TEST_DATA", DEFAULT_TEST_DATA))
 
 
@@ -64,7 +64,7 @@ def runner() -> ShredtoolsRunner:
 
 @pytest.fixture(scope="session")
 def data_dir() -> Path:
-    d = test_data_dir()
+    d = get_test_data_dir()
     if not d.is_dir():
         pytest.skip(f"Test data directory not found: {d}")
     return d

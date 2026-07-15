@@ -25,6 +25,10 @@ Requires the `shredtools` conda env and fixtures under `test_data/` (see `test_d
 | `test_subset.py` | `subset` happy path + edge cases |
 | `test_extract.py` | `extract` BED output + edge cases |
 | `test_shred_enhance_fasta.py` | `shred`, `enhance`, `fasta` |
+| `test_hg_edges.py` | Human edge regions from `hg_edge_regions.py` (slow) |
+| `test_stale_index.py` | Stale `.bi` index silently wrong row counts |
+| `hg_edge_regions.py` | Region constants + derivation notes |
+| `_probe_hg_edges.py` | Re-discover edge coords from lengths/bumbl |
 
 ## Markers
 
