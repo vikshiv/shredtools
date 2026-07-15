@@ -3,10 +3,13 @@
 Schemas: see bumbl_index.md for description
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import os
 import struct
+import sys
+import tempfile
 from typing import Protocol
 import urllib.error
 import urllib.request
@@ -461,6 +464,91 @@ class BumblSingleIndex:
         return coord // self.bin_width
 
 
+def get_mum_ranges_region(index, coords):
+    """
+    Return row ranges for every bin overlapping ``coords`` on the indexed sequence.
+
+    ``coords`` is ``(start, end)`` with inclusive global end, as returned by
+    :func:`convert_local_to_global_coords`.
+    """
+    s, e = coords
+    bin_start = index.coord_to_bin(s)
+    bin_end = index.coord_to_bin(e)
+    if bin_start > index.max_bin or bin_end > index.max_bin:
+        return None
+    return index.get_bins((bin_start, bin_end))
+
+
+def is_url(path: str) -> bool:
+    return isinstance(path, str) and (
+        path.startswith("http://") or path.startswith("https://")
+    )
+
+
+@contextmanager
+def local_file(path_or_url: str):
+    """Yield a local path, downloading ``path_or_url`` via HTTP GET when it is a URL."""
+    if not is_url(path_or_url):
+        yield path_or_url
+        return
+
+    tmp_path = None
+    try:
+        try:
+            with urllib.request.urlopen(path_or_url) as resp:
+                data = resp.read()
+        except urllib.error.HTTPError as e:
+            print(
+                f"Failed to fetch lengths file {path_or_url} (HTTP {e.code})",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from e
+        except urllib.error.URLError as e:
+            print(
+                f"Failed to fetch lengths file {path_or_url}: {e.reason}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from e
+        tmp = tempfile.NamedTemporaryFile(suffix=".lengths", delete=False)
+        tmp_path = tmp.name
+        tmp.write(data)
+        tmp.close()
+        yield tmp_path
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def resolve_bumbl_sidecars(mum_file, bi=None, lens=None):
+    """Resolve default ``.bumbl.bi`` and ``.lengths`` sidecars for extract/subset."""
+    if not is_url(mum_file) and not os.path.exists(mum_file):
+        print(f"MUM file {mum_file} not found", file=sys.stderr)
+        raise SystemExit(1)
+
+    if mum_file.endswith(".bumbl") and bi is None:
+        bi = mum_file + ".bi"
+        if not is_url(bi) and not os.path.exists(bi):
+            print(
+                f"Bumbl index {bi} not found, and no bumbl index provided",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+    if lens is None:
+        lens = os.path.splitext(mum_file)[0] + ".lengths"
+        if not is_url(lens) and not os.path.exists(lens):
+            print(
+                f"Lengths file {lens} not found, and no lengths file provided",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+    return bi, lens
+
+
 def _url_size(url):
     req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
     try:
@@ -529,10 +617,7 @@ class _UrlReader:
 def _open_reader(src):
     if isinstance(src, (_FileReader, _UrlReader)):
         return src
-    is_url = isinstance(src, str) and (
-        src.startswith("http://") or src.startswith("https://")
-    )
-    if is_url:
+    if is_url(src):
         return _UrlReader(src)
     return src
 

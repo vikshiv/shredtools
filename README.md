@@ -54,7 +54,7 @@ shredtools fasta regions/prefix.bed -o fasta_out/
 
 ### Index a `.bumbl` file
 
-`extract` on a `.bumbl` input requires a `.bumbl.bi` index alongside it. The index maps genomic bins to row ranges in the `.bumbl` file so only subsets of MUMs are loaded at a time.
+`extract` and `subset` on a `.bumbl` input require a `.bumbl.bi` index alongside it. The index maps genomic bins to row ranges in the `.bumbl` file so only subsets of MUMs are loaded at a time. For remote queries, `.bumbl`, `.bumbl.bi`, and `.lengths` can all be HTTP(S) URLs when co-hosted in the same directory (auto-detected from the `.bumbl` path). The `.bumbl` and `.bumbl.bi` files require byte-range HTTP support; `.lengths` is fetched with a plain GET.
 
 **Prerequisites**
 
@@ -85,7 +85,7 @@ shredtools index pangenome.coll.bumbl -s 0 --single # single-index
 | Flag                   | Default             | Description                                                           |
 | ---------------------- | ------------------- | --------------------------------------------------------------------- |
 | `-s` / `--seq-idx`     | `0`                 | Reference assembly for single-index                                   |
-| `--multi` / `--single` | `--multi` (default) | Multi-index: per-sequence bins (used by `extract`)                    |
+| `--multi` / `--single` | `--multi` (default) | Multi-index: per-sequence bins (used by `extract` and `subset`)       |
 | `-w` / `--bin-width`   | `1000000`           | Genomic bin width (bp) (large = smaller index, more memory per query) |
 | `-o` / `--output`      | `<bumbl>.bi`        | Output path                                                           |
 | `-v` / `--verbose`     | off                 | Progress on stderr                                                    |
@@ -95,6 +95,18 @@ shredtools index pangenome.coll.bumbl -s 0 --single # single-index
 > A `.bumbl.bi` file is a binary index corresponding to an associated `.bumbl` **row order**. If the order of the `.bumbl` file changes (such as running `shredtools sort`), then the index is invalid and needs to be re-generated. 
 
 For the full index specifications, see **[bumbl_index/bumbl_index.md](bumbl_index/bumbl_index.md)**.
+
+### Subset MUM rows in a region
+
+With a `.bumbl.bi` index, `subset` loads only the multi-MUM rows overlapping a query interval on one assembly (same `-s` / `-r` as `extract`). Writes `.mums` to stdout by default, or `.bumbl` with `-o`. The input `.bumbl`, index (`-b`), and lengths (`-l`) can be local paths or HTTP(S) URLs; when all three are co-hosted, only the `.bumbl` URL is required.
+
+```bash
+shredtools subset pangenome.coll.bumbl -s 0 -r chr1:1000000-2000000 -l pangenome.lengths > region.mums
+shredtools subset pangenome.coll.bumbl -s 0 -r chr1:1000000-2000000 -o region.bumbl
+
+# Remote .bumbl only (auto-detects .bumbl.bi and .lengths in the same directory)
+shredtools subset https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000
+```
 
 ---
 
@@ -107,9 +119,9 @@ Given a query interval on one pangenome sequence, `extract` finds the bounding m
 
 | File                 | Description                                                      |
 | -------------------- | ---------------------------------------------------------------- |
-| `pangenome.bumbl`    | Positional argument, can be a remote file url                    |
-| `pangenome.bumbl.bi` | Default: `<mum_file>.bi`, or `-b`                                |
-| `pangenome.lengths`  | Default: `<stem>.lengths`, or `-l` (mumemto multilengths format) |
+| `pangenome.bumbl`    | Positional argument; local path or HTTP(S) URL                     |
+| `pangenome.bumbl.bi` | Default: `<mum_file>.bi`, or `-b`; local path or HTTP(S) URL     |
+| `pangenome.lengths`  | Default: `<stem>.lengths`, or `-l`; local path or HTTP(S) URL (mumemto multilengths format) |
 
 
 **Region format.** `--range` is **contig-local** on the sequence named by `-s`: `contig:start-end` (e.g. `chr1:1000000-2000000`).
@@ -144,9 +156,8 @@ shredtools extract pangenome.coll.bumbl -s 0 -r chr1:1-50000 -x 0 1 2
 shredtools extract pangenome.coll.bumbl -s 0 -r chr1:1000000-2000000 \
   -o regions/prefix -l pangenome.lengths --plot
 
-# Remote .bumbl and index (HTTP range requests)
-shredtools extract https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000 \
-  -b https://url/to/pangenome.bumbl.bi -l pangenome.lengths
+# Remote .bumbl only (auto-detects .bumbl.bi and .lengths in the same directory)
+shredtools extract https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000
 ```
 
 When the query interval does not align exactly to MUM boundaries, `extract` prints `left margin` and/or `right margin` on stderr (distance in bp from the query edge to the enclosing MUM). This serves as a guide for the bounding region around the extracted regions.
@@ -183,6 +194,7 @@ shredtools fasta regions/prefix.bed -o fasta_out/ --agc archive.agc -t 8
 | `shredtools filter`  | Keep only collinear-block MUMs in a `.bumbl`            |
 | `shredtools index`   | Build a `.bumbl.bi` index for interval queries          |
 | `shredtools extract` | Extract syntenic regions from a query interval (BED)    |
+| `shredtools subset`  | Subset multi-MUM rows overlapping a query region        |
 | `shredtools fasta`   | Fetch FASTA sequences for an extract/shred BED          |
 | `shredtools enhance` | Fill gaps between collinear MUMs with local mumemto     |
 | `shredtools stats`   | Print MUM file metadata and associated sidecar paths    |

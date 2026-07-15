@@ -14,6 +14,10 @@ dependencies = [
     "tqdm",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+plot = ["matplotlib"]
+
 [project.scripts]
 shredtools = "shredtools.cli:main"
 

@@ -4,22 +4,72 @@
 from __future__ import annotations
 
 import importlib
+import os
+import signal
 import sys
 
-COMMANDS: dict[str, tuple[str, str]] = {
-    "extract": ("shredtools.extract_from_mums", "main"),
-    "fasta": ("shredtools.extract_fastas", "main"),
-    "filter": ("shredtools.filter_collinear", "main"),
-    "index": ("shredtools.index_bumbl", "main"),
-    "shred": ("shredtools.shred_from_mums", "main"),
-    "sort": ("shredtools.sort_bumbl", "main"),
-    "enhance": ("shredtools.enhance", "main"),
-    "stats": ("shredtools.stats", "main"),
+# When stdout is closed early (e.g. `| less` then quit), exit cleanly instead
+# of raising BrokenPipeError. Python ignores SIGPIPE by default, which turns
+# closed-pipe writes into exceptions; restoring SIG_DFL matches typical Unix CLI
+# behavior (no traceback).
+try:
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+except (AttributeError, ValueError):
+    pass
+
+COMMANDS: dict[str, tuple[str, str, str]] = {
+    "enhance": (
+        "shredtools.enhance",
+        "main",
+        "Enhance multi-MUM collection by finding local MUMs in gaps between collinear global MUMs.",
+    ),
+    "extract": (
+        "shredtools.extract_from_mums",
+        "main",
+        "Extract syntenic regions given a query interval from any assembly in the collection using multi-MUMs.",
+    ),
+    "fasta": (
+        "shredtools.extract_fastas",
+        "main",
+        "Extract FASTA regions from a BED file produced by shredtools extract.",
+    ),
+    "filter": (
+        "shredtools.filter_collinear",
+        "main",
+        "Filter out non-collinear MUMs.",
+    ),
+    "index": (
+        "shredtools.index_bumbl",
+        "main",
+        "Write a .bumbl.bi index for a .bumbl file (single or multi), optionally verifying row order.",
+    ),
+    "shred": (
+        "shredtools.shred_from_mums",
+        "main",
+        "Shred a MUM file into smaller fragments and optionally visualize.",
+    ),
+    "sort": (
+        "shredtools.sort_bumbl",
+        "main",
+        "Sort a .bumbl file by start position and write output.",
+    ),
+    "stats": (
+        "shredtools.stats",
+        "main",
+        "Report header metadata and associated files for a .mums or .bumbl file.",
+    ),
+    "subset": (
+        "shredtools.subset_from_mums",
+        "main",
+        "Subset to only multi-MUM rows contained in a query region from a specific assembly.",
+    ),
 }
 
 __version__ = "0.1.0"
 
-_COMMAND_HELP = "\n".join(f"  {name:8}  {mod.rsplit('.', 1)[-1]}" for name, (mod, _) in sorted(COMMANDS.items()))
+_COMMAND_HELP = "\n".join(
+    f"  {name:8}  {desc}" for name, (_, _, desc) in sorted(COMMANDS.items())
+)
 
 
 def _print_top_level_help() -> None:
@@ -35,7 +85,28 @@ def _print_top_level_help() -> None:
     print("Version:", __version__)
 
 
+def _exit_on_broken_pipe() -> None:
+    """Avoid flush errors during interpreter shutdown after stdout closes."""
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        pass
+    try:
+        fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(fd, sys.stdout.fileno())
+    except OSError:
+        pass
+    raise SystemExit(0)
+
+
 def main(argv: list[str] | None = None) -> None:
+    try:
+        _run(argv)
+    except BrokenPipeError:
+        _exit_on_broken_pipe()
+
+
+def _run(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
 
@@ -60,7 +131,7 @@ def main(argv: list[str] | None = None) -> None:
         _print_top_level_help()
         raise SystemExit(1)
 
-    module_name, attr = spec
+    module_name, attr, _ = spec
     module = importlib.import_module(module_name)
     entry = getattr(module, attr)
 
