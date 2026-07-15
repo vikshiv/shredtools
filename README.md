@@ -12,7 +12,18 @@ Shredtools expects a set of multi-MUMs in a `.bumbl` file (use `mumemto -b` or `
 
 ## Installation
 
-Requires [mumemto](https://github.com/vikshiv/mumemto) at runtime (not installed automatically by pip, can be installed via conda, pip, or from source). Python 3.9+.
+### Conda (recommended)
+
+Requires [mumemto](https://github.com/vikshiv/mumemto) at runtime. The Bioconda package installs both shredtools and mumemto. Python 3.9+.
+
+```bash
+conda create -n shredtools_env python=3.10
+conda activate shredtools_env
+conda install -c conda-forge -c bioconda shredtools
+shredtools -h
+```
+
+### From source (development)
 
 ```bash
 git clone https://github.com/vikshiv/shredtools.git
@@ -21,11 +32,13 @@ pip install -e .
 shredtools -h
 ```
 
+Install [mumemto](https://github.com/vikshiv/mumemto) separately (Bioconda, or `git clone` + `pip install .` from source).
+
 You can also run `python -m shredtools`.
 
-**Pip dependencies:** `numpy`, `pysam`, `tqdm`
+**Dependencies:** `numpy`, `pysam`, `tqdm` (plus mumemto at runtime)
 
-**Optional:** `matplotlib` (for `extract --plot` / `--plot-full`); `.fai` indexes beside reference FASTAs, or the `agc` tool (`fasta --agc`) for sequence extraction (can be installed via bioconda).
+**Optional:** `matplotlib` (for `extract --plot` / `--plot-full`; included in the Bioconda package); `.fai` indexes beside reference FASTAs, or the `agc` tool (`fasta --agc`) for sequence extraction (can be installed via bioconda).
 
 ---
 

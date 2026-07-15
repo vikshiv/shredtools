@@ -8,14 +8,20 @@ version = "0.1.0"
 description = "Utilities for manipulating the pangenome coordinate system with multi-MUMs"
 readme = "README.md"
 requires-python = ">=3.9"
+license = { text = "GPL-3.0-only" }
+authors = [{ name = "Vikram Shivakumar", email = "vshivak1@jhu.edu" }]
 dependencies = [
     "numpy",
     "pysam",
     "tqdm",
 ]
 
+[project.urls]
+Homepage = "https://github.com/vikshiv/shredtools"
+Repository = "https://github.com/vikshiv/shredtools"
+Issues = "https://github.com/vikshiv/shredtools/issues"
+
 [project.optional-dependencies]
-dev = ["pytest>=7"]
 plot = ["matplotlib"]
 
 [project.scripts]
@@ -23,4 +29,3 @@ shredtools = "shredtools.cli:main"
 
 [tool.setuptools]
 packages = ["shredtools"]
-
