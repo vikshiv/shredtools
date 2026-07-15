@@ -6,7 +6,7 @@ Shredtools is a toolkit for querying a pangenome using multi-MUMs computed by [M
 
 Shredtools expects a set of multi-MUMs in a `.bumbl` file (use `mumemto -b` or `mumemto convert`) and a corresponding `.lengths`. See [Mumemto](https://github.com/vikshiv/mumemto) for details on file formats.
 
-**Browser:** try the `shredtools` extract web app at https://vikshiv.github.io/shredtools/
+**Browser:** try the `shredtools` extract web app at [https://vikshiv.github.io/shredtools/](https://vikshiv.github.io/shredtools/)
 
 ---
 
@@ -112,7 +112,7 @@ shredtools subset https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000
 
 ### Extract homologous regions
 
-Given a query interval on one pangenome sequence, `extract` finds the bounding multi-MUMs and reports the syntenic interval on each selected genome as BED.
+Given a query interval on one pangenome sequence, `extract` finds the bounding multi-MUMs and reports the syntenic interval on each selected genome as BED. Input files can be remote URLs (see the [Index Zone](https://benlangmead.github.io/aws-indexes/mumemto) for pre-built indexes over HPRC2).
 
 **Required inputs**
 
@@ -206,4 +206,4 @@ Run `shredtools <command> -h` for full options.
 
 ## Getting help
 
-If you run into issues or have questions, open a GitHub issue on this repository or reach out to vshivak1 [at] jhu.edu.
+If you run into issues or have questions, open a GitHub issue on this repository or reach out to vs632 [at] cam.ac.uk.
