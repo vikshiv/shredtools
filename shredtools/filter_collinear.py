@@ -81,8 +81,8 @@ def main(args=None):
     last = -1
     for s, e in mums.blocks:
         cur = e - s + 1
-        new_blocks.append((last+1, last+1+cur))
-        last = last+1+cur
+        new_blocks.append((last+1, last+cur))
+        last = last+cur
 
     mums = mums[coll_mums, :]
 
