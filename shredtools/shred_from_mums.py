@@ -181,7 +181,7 @@ def _write_bed_line(handle, global_start, global_end, contig_names, seq_lengths_
     if converted is None:
         return
     name, rel_offsets = converted
-    handle.write(f"{name}\t{rel_offsets[0]}\t{rel_offsets[1]}\t{fasta_path}\n")
+    handle.write(f"{name}\t{rel_offsets[0]}\t{rel_offsets[1] + 1}\t{fasta_path}\n")
 
 
 def shred_bed(args, shredded_mums, contig_names, seq_lengths_multi):
