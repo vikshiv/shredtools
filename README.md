@@ -8,6 +8,8 @@ Shredtools expects a set of multi-MUMs in a `.bumbl` file (use `mumemto -b` or `
 
 **Browser:** try the `shredtools` extract web app at [https://vikshiv.github.io/shredtools/](https://vikshiv.github.io/shredtools/)
 
+**Preprint:** [https://www.biorxiv.org/content/biorxiv/early/2026/07/08/2026.07.03.736354.full.pdf](https://www.biorxiv.org/content/biorxiv/early/2026/07/08/2026.07.03.736354.full.pdf)
+
 ---
 
 ## Installation
