@@ -78,6 +78,63 @@ def get_contig_names_from_text(text: str, *, label="<lengths>"):
     return names
 
 
+# Strip sequence-file suffixes from assembly labels (order matters: compound first).
+_ASSEMBLY_EXTS = (
+    ".fasta.gz",
+    ".fastq.gz",
+    ".fa.gz",
+    ".fna.gz",
+    ".fq.gz",
+    ".fasta.bz2",
+    ".fa.bz2",
+    ".fna.bz2",
+    ".fasta.xz",
+    ".fa.xz",
+    ".fna.xz",
+    ".fasta",
+    ".fastq",
+    ".fna",
+    ".fa",
+    ".fq",
+)
+
+
+def clean_assembly_label(name: str) -> str:
+    """Basename of a path/label with standard sequence extensions removed."""
+    s = str(name or "").strip()
+    if not s:
+        return s
+    base = s.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    lower = base.lower()
+    for ext in _ASSEMBLY_EXTS:
+        if lower.endswith(ext):
+            return base[: -len(ext)]
+    return base
+
+
+def get_assembly_names_from_text(text: str, *, label="<lengths>"):
+    """
+    Assembly labels from multilengths ``*`` header lines (column 0).
+
+    Supports both ``asm *`` and ``/path/to/asm.fa.gz * 12345`` styles.
+    Returns cleaned basenames (no directory / sequence extensions).
+    """
+    names = []
+    first_line = True
+    for raw in _nonempty_lines(text):
+        parts = raw.split()
+        if len(parts) < 2:
+            continue
+        if first_line and parts[1] != "*":
+            raise ValueError("Lengths file must be formatted as multilengths.")
+        first_line = False
+        if parts[1] == "*":
+            names.append(clean_assembly_label(parts[0]))
+    if not names:
+        raise ValueError(f"No assembly headers found in lengths: {label}")
+    return names
+
+
 def get_sequence_lengths(lengths_file, multilengths=False):
     # Copied from https://github.com/vikshiv/mumemto/blob/main/mumemto/utils.py
     try:

@@ -33,6 +33,9 @@ PANGENOMES: dict[str, dict[str, str]] = {
     },
 }
 
+# Built-in HPRC presets only (custom remote datasets are registered at runtime).
+_BUILTIN_PANGENOME_KEYS = ("hprcv2_enhanced", "hprcv2_merged", "hprcv1")
+
 
 def _bumbl_stem(bumbl_url: str) -> str:
     return bumbl_url.rsplit("/", 1)[-1].removesuffix(".bumbl")
@@ -102,11 +105,12 @@ def load_lengths_bundle_path(path: str) -> None:
     Load merged lengths JSON into memory. Call from the browser after writing the file to MEMFS.
 
     Each top-level value must include ``seq_lengths_multi`` and ``contig_names`` (see ``lengths_to_json.py``).
+    Only built-in HPRC keys are required; custom datasets are added via ``register_custom_pangenome``.
     """
     global _LENGTHS_BUNDLE
     with open(path, "r", encoding="utf-8") as f:
         bundle = json.load(f)
-    for k in PANGENOMES:
+    for k in _BUILTIN_PANGENOME_KEYS:
         if k not in bundle:
             raise ValueError(f"Lengths bundle missing preset key {k!r}")
         ent = bundle[k]
@@ -116,14 +120,88 @@ def load_lengths_bundle_path(path: str) -> None:
             raise ValueError(f"Invalid lengths entry for {k!r}")
         if len(sm) != len(cn):
             raise ValueError(f"seq_lengths_multi / contig_names length mismatch for {k!r}")
+    # Preserve any already-registered custom entries if this is called again.
+    if _LENGTHS_BUNDLE is not None:
+        for k, ent in _LENGTHS_BUNDLE.items():
+            if k not in _BUILTIN_PANGENOME_KEYS:
+                bundle[k] = ent
     _LENGTHS_BUNDLE = bundle
 
 
+def register_custom_pangenome(
+    key: str, label: str, bumbl: str, bi: str, lengths_text: str
+) -> None:
+    """
+    Register a remote custom dataset from multilengths text + bumbl/bi URLs.
+
+    Contig metadata is parsed from ``lengths_text`` (same format as Mumemto ``.lengths``).
+    """
+    global _LENGTHS_BUNDLE, ACTIVE_PANGENOME, _LAST_EXTRACT
+    if _LENGTHS_BUNDLE is None:
+        raise RuntimeError("Lengths bundle not loaded; call load_lengths_bundle_path first.")
+    k = str(key or "").strip()
+    if not k:
+        raise ValueError("Custom pangenome key is required.")
+    if k in _BUILTIN_PANGENOME_KEYS:
+        raise ValueError(f"Cannot overwrite built-in pangenome {k!r}")
+    lab = str(label or "").strip() or k
+    bumbl_url = str(bumbl or "").strip()
+    bi_url = str(bi or "").strip()
+    if not bumbl_url or not bi_url:
+        raise ValueError("bumbl and bi URLs are required.")
+    text = str(lengths_text or "")
+    sm = sutils.get_sequence_lengths_from_text(text, multilengths=True, label=k)
+    cn = sutils.get_contig_names_from_text(text, label=k)
+    asm = sutils.get_assembly_names_from_text(text, label=k)
+    if len(sm) != len(cn):
+        raise ValueError(f"seq_lengths_multi / contig_names length mismatch for {k!r}")
+    if len(asm) != len(sm):
+        raise ValueError(f"assembly_labels / seq_lengths_multi length mismatch for {k!r}")
+    if not sm:
+        raise ValueError(f"No sequences found in lengths for {k!r}")
+    PANGENOMES[k] = {
+        "label": lab,
+        "bumbl": bumbl_url,
+        "bi": bi_url,
+        "lengths": "",
+    }
+    _LENGTHS_BUNDLE[k] = {
+        "seq_lengths_multi": sm,
+        "contig_names": cn,
+        "assembly_labels": asm,
+    }
+    # Drop cached indexes for this key (re-register / update).
+    stale = [ck for ck in _INDEX_BY_SEQ if ck.startswith(f"{k}:")]
+    for ck in stale:
+        del _INDEX_BY_SEQ[ck]
+    if ACTIVE_PANGENOME == k:
+        _LAST_EXTRACT = None
+
+
+def unregister_custom_pangenome(key: str) -> None:
+    """Remove a previously registered custom dataset."""
+    global ACTIVE_PANGENOME, _LAST_EXTRACT
+    k = str(key or "").strip()
+    if k in _BUILTIN_PANGENOME_KEYS:
+        raise ValueError(f"Cannot unregister built-in pangenome {k!r}")
+    if k not in PANGENOMES:
+        return
+    del PANGENOMES[k]
+    if _LENGTHS_BUNDLE is not None and k in _LENGTHS_BUNDLE:
+        del _LENGTHS_BUNDLE[k]
+    stale = [ck for ck in _INDEX_BY_SEQ if ck.startswith(f"{k}:")]
+    for ck in stale:
+        del _INDEX_BY_SEQ[ck]
+    if ACTIVE_PANGENOME == k:
+        ACTIVE_PANGENOME = "hprcv2_enhanced"
+        _LAST_EXTRACT = None
+        _INDEX_BY_SEQ.clear()
+
+
 def pangenome_options_json() -> str:
-    """Dropdown options: key and UI label."""
-    order = ["hprcv2_enhanced", "hprcv2_merged", "hprcv1"]
+    """Dropdown options for built-in HPRC presets: key and UI label."""
     out = []
-    for k in order:
+    for k in _BUILTIN_PANGENOME_KEYS:
         if k in PANGENOMES:
             p = PANGENOMES[k]
             out.append({"key": k, "label": p["label"]})
@@ -131,7 +209,7 @@ def pangenome_options_json() -> str:
 
 
 def set_active_pangenome(key: str) -> None:
-    """Switch active S3 bumbl/bi pair; clears index cache only (lengths stay in the loaded bundle)."""
+    """Switch active bumbl/bi pair; clears index cache only (lengths stay in the loaded bundle)."""
     global ACTIVE_PANGENOME
     if key not in PANGENOMES:
         raise ValueError(f"Unknown pangenome {key!r}")
@@ -154,7 +232,20 @@ def _get_lengths_meta():
     seq_lengths_multi = ent["seq_lengths_multi"]
     contig_names = ent["contig_names"]
     n = len(seq_lengths_multi)
-    return seq_lengths_multi, contig_names, n
+    assembly_labels = ent.get("assembly_labels")
+    if not isinstance(assembly_labels, list) or len(assembly_labels) != n:
+        assembly_labels = None
+    return seq_lengths_multi, contig_names, n, assembly_labels
+
+
+def _genome_label_for(i: int, contig_names, assembly_labels) -> str:
+    """Prefer cleaned assembly labels (custom datasets); else first contig (HPRC PanSN)."""
+    if assembly_labels is not None and i < len(assembly_labels):
+        lab = str(assembly_labels[i] or "").strip()
+        if lab:
+            return lab
+    cnames = contig_names[i] if i < len(contig_names) else None
+    return cnames[0] if cnames else f"seq_{i}"
 
 
 def _index_cache_key(seq_idx: int) -> str:
@@ -314,15 +405,14 @@ async def _get_mums_expanding(idx, coords, seq_idx, max_steps: int = 8):
 
 def describe_ui() -> str:
     """JSON for genome / contig dropdowns (uses the loaded lengths bundle for ``ACTIVE_PANGENOME``)."""
-    seq_lengths_multi, contig_names, n = _get_lengths_meta()
+    seq_lengths_multi, contig_names, n, assembly_labels = _get_lengths_meta()
     genomes = []
     for i in range(n):
         cnames = contig_names[i]
-        label = cnames[0] if cnames else f"seq_{i}"
         genomes.append(
             {
                 "seq_idx": i,
-                "label": label,
+                "label": _genome_label_for(i, contig_names, assembly_labels),
                 "contigs": cnames,
                 "contig_lengths": [int(x) for x in seq_lengths_multi[i]],
             }
@@ -331,17 +421,12 @@ def describe_ui() -> str:
 
 
 def _genome_labels() -> list[str]:
-    seq_lengths_multi, contig_names, n = _get_lengths_meta()
-    del seq_lengths_multi
-    labels = []
-    for i in range(n):
-        cnames = contig_names[i]
-        labels.append(cnames[0] if cnames else f"seq_{i}")
-    return labels
+    _sm, contig_names, n, assembly_labels = _get_lengths_meta()
+    return [_genome_label_for(i, contig_names, assembly_labels) for i in range(n)]
 
 
 def _seq_lengths_totals() -> list[int]:
-    seq_lengths_multi, _cn, _n = _get_lengths_meta()
+    seq_lengths_multi, _cn, _n, _asm = _get_lengths_meta()
     return [sum(x) for x in seq_lengths_multi]
 
 
@@ -444,7 +529,7 @@ async def run_with_bounds(
     _LAST_EXTRACT = None
 
     try:
-        seq_lengths_multi, contig_names, num_seqs = _get_lengths_meta()
+        seq_lengths_multi, contig_names, num_seqs, assembly_labels = _get_lengths_meta()
         if not (0 <= seq_idx < num_seqs):
             raise ValueError(f"seq_idx {seq_idx} invalid (N = {num_seqs})")
         # For the browser app we always compute all sequences; UI-side filtering is handled in JS.
@@ -492,11 +577,7 @@ async def run_with_bounds(
                 msg = e.args[0] if e.args else str(e)
                 m = _span_re.search(str(msg))
                 c1, c2 = (m.group(1), m.group(2)) if m else ("", "")
-                label = (
-                    contig_names[int(seq)][0]
-                    if contig_names[int(seq)]
-                    else f"seq_{int(seq)}"
-                )
+                label = _genome_label_for(int(seq), contig_names, assembly_labels)
                 unavailable.append(
                     {
                         "seq_idx": int(seq),
