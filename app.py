@@ -93,7 +93,7 @@ _LENGTHS_BUNDLE: dict | None = None
 # Index cache: "pangenome_key:seq_idx" → parsed multi-index document.
 _INDEX_BY_SEQ: dict = {}
 
-# Last successful extract (for synteny plot without re-fetching S3).
+# Last successful extract (BED from flanks; plot reloads bins left_bin..right_bin).
 _LAST_EXTRACT: dict | None = None
 
 
@@ -264,6 +264,13 @@ async def _get_mums_expanding(idx, coords, seq_idx, max_steps: int = 8):
     """
     Fetch MUMs for bins around coords: first use index flanks + span bounds (extract path),
     sort by query column, then optionally widen bins if the slice still fails to bracket.
+
+    Returns
+    -------
+    (mums, right_key), ranges, (bin_start, bin_end), (left_bin, right_bin)
+        On success. ``(left_bin, right_bin)`` are the final expanded flank bins (inclusive).
+    None, [], (bin_start, bin_end), None
+        When no usable flanks.
     """
     s, e = int(coords[0]), int(coords[1])
     bin_start = idx.coord_to_bin(s)
@@ -271,13 +278,13 @@ async def _get_mums_expanding(idx, coords, seq_idx, max_steps: int = 8):
 
     got = await sutils.get_mum_ranges_flanks(idx, (s, e))
     if got is None:
-        return None, [], (bin_start, bin_end)
+        return None, [], (bin_start, bin_end), None
 
     ranges, (left_bin, right_bin), _ = got
     steps = 0
     while True:
         if not ranges:
-            return None, [], (bin_start, bin_end)
+            return None, [], (bin_start, bin_end), None
 
         mums = await sutils.parse_bumbl_range(_active_bumbl(), ranges)
         mums = sutils.sort_mums_by_seq_column(mums, seq_idx)
@@ -285,7 +292,7 @@ async def _get_mums_expanding(idx, coords, seq_idx, max_steps: int = 8):
         right_key = [starts_col[i] + int(mums.lengths[i]) for i in range(int(mums.num_mums))]
         left_ok, right_ok = _bracket_ok(mums, (s, e), seq_idx, right_key)
         if left_ok and right_ok:
-            return (mums, right_key), ranges, (bin_start, bin_end)
+            return (mums, right_key), ranges, (bin_start, bin_end), (int(left_bin), int(right_bin))
 
         if steps >= int(max_steps):
             raise ValueError(
@@ -345,9 +352,42 @@ def _seq_lengths_totals() -> list[int]:
     return [sum(x) for x in seq_lengths_multi]
 
 
-def plot_extract_png(seq_indices: list[int], dark: bool = False) -> str:
+def _chunk_to_plot_mums(chunk, seq_idx, bound_lo, bound_hi, seq_list, other_coords):
+    """
+    Project MUM rows in ``[bound_lo, bound_hi]`` on ``seq_idx`` onto ``seq_list`` columns,
+    subtracting each sequence's ``other_coords`` window start (window-relative coords).
+    Returns ``(plot_mums, n_kept)``.
+    """
+    from array import array
+
+    out_lengths = array("I")
+    out_starts = array("q")
+    out_strands = bytearray()
+    n_kept = 0
+    bound_lo = int(bound_lo)
+    bound_hi = int(bound_hi)
+    for i in range(int(chunk.num_mums)):
+        st = chunk.start(i, seq_idx)
+        if st < 0 or st < bound_lo or st > bound_hi:
+            continue
+        out_lengths.append(int(chunk.lengths[i]))
+        for src_seq in seq_list:
+            x = chunk.start(i, src_seq)
+            if x != -1:
+                x = x - int(other_coords[src_seq][0])
+            out_starts.append(int(x))
+            out_strands.append(1 if chunk.strand(i, src_seq) else 0)
+        n_kept += 1
+    return sutils.MUMdata(len(seq_list), out_lengths, out_starts, out_strands), n_kept
+
+
+async def plot_extract_png(seq_indices: list[int], dark: bool = False) -> str:
     """
     Render extract synteny for the last ``run_with_bounds`` result.
+
+    Loads MUM bins ``left_bin..right_bin`` one at a time (subset-style byte ranges),
+    converts each chunk to polygons, then discards the chunk so peak memory stays ~one bin.
+
     Returns JSON: ``{png_b64, n_mums, n_rows}`` or ``{error}``.
     Matplotlib must already be loaded in Pyodide (``loadPackage`` from JS).
     """
@@ -358,9 +398,11 @@ def plot_extract_png(seq_indices: list[int], dark: bool = False) -> str:
     ctx = _LAST_EXTRACT
     seq_idx = int(ctx["seq_idx"])
     coords = ctx["coords"]
-    mums = ctx["mums"]
-    mum_bounds = ctx["mum_bounds"]
     other_coords = ctx["other_coords"]
+    left_bin = int(ctx["left_bin"])
+    right_bin = int(ctx["right_bin"])
+    bound_lo, bound_hi = ctx["bound_starts"]
+    bound_lo, bound_hi = int(bound_lo), int(bound_hi)
     num_seqs = len(other_coords)
 
     if not seq_indices:
@@ -386,29 +428,56 @@ def plot_extract_png(seq_indices: list[int], dark: bool = False) -> str:
 
     try:
         import synteny_plot
+        import viz_mums
     except ImportError as e:
         return json.dumps({"error": f"Plot module not available: {e}"})
 
     try:
-        png = synteny_plot.plot_extract(
+        idx, _ = await _get_index(seq_idx)
+        polygons = []
+        colors = []
+        n_mums = 0
+        centering = [0] * len(plot_seqs)
+
+        for b in range(left_bin, right_bin + 1):
+            if idx.bin_is_empty(b):
+                continue
+            ranges = await idx.get_bins(b)
+            if not ranges:
+                continue
+            chunk = await sutils.parse_bumbl_range(_active_bumbl(), ranges)
+            plot_mums, n_kept = _chunk_to_plot_mums(
+                chunk, seq_idx, bound_lo, bound_hi, plot_seqs, other_coords
+            )
+            del chunk
+            if n_kept == 0:
+                continue
+            poly, cols = viz_mums.get_mum_polygons(
+                plot_mums, centering, inv_color="green"
+            )
+            del plot_mums
+            polygons.extend(poly)
+            colors.extend(cols)
+            n_mums += n_kept
+
+        png = synteny_plot.plot_extract_polygons(
             coords,
-            mums,
-            mum_bounds,
             other_coords,
             seq_idx,
             plot_seqs,
             seq_lengths,
+            polygons,
+            colors,
             genome_labels=genome_labels,
             dark=bool(dark),
         )
     except Exception as e:
         return json.dumps({"error": str(e)})
 
-    n_mums = int(mum_bounds[1]) - int(mum_bounds[0]) + 1
     return json.dumps(
         {
             "png_b64": base64.b64encode(png).decode("ascii"),
-            "n_mums": n_mums,
+            "n_mums": int(n_mums),
             "n_rows": len(plot_seqs),
         }
     )
@@ -454,7 +523,9 @@ async def run_with_bounds(
             range_str, contig_names[seq_idx], seq_lengths_multi[seq_idx]
         )
         idx, _ = await _get_index(seq_idx)
-        got, ranges, requested_bins = await _get_mums_expanding(idx, coords, seq_idx)
+        got, ranges, requested_bins, flank_bins = await _get_mums_expanding(
+            idx, coords, seq_idx
+        )
         if got is None:
             raise ValueError(
                 f"No bounding MUMs found for region {range_str!r} (bins {requested_bins})."
@@ -467,6 +538,11 @@ async def run_with_bounds(
         mum_bounds, other_coords = find_target_region(
             mums, coords, seq_idx, sequences, right_key=right_key
         )
+        left_bin, right_bin = flank_bins
+        bound_starts = (
+            int(mums.start(mum_bounds[0], seq_idx)),
+            int(mums.start(mum_bounds[1], seq_idx)),
+        )
         _LAST_EXTRACT = {
             "seq_idx": int(seq_idx),
             "coords": coords,
@@ -474,6 +550,9 @@ async def run_with_bounds(
             "mum_bounds": mum_bounds,
             "other_coords": other_coords,
             "sequences": sequences,
+            "left_bin": int(left_bin),
+            "right_bin": int(right_bin),
+            "bound_starts": bound_starts,
         }
         rows = []
         unavailable = []

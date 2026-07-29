@@ -56,15 +56,16 @@ def plot(
         ax.set_xlim(*xlims)
     else:
         ax.set_xlim(0, max_length)
-    ax.add_collection(
-        PolyCollection(
-            polygons,
-            linewidths=0,
-            alpha=0.8,
-            edgecolors=colors,
-            facecolors=colors,
+    if polygons:
+        ax.add_collection(
+            PolyCollection(
+                polygons,
+                linewidths=0,
+                alpha=0.8,
+                edgecolors=colors,
+                facecolors=colors,
+            )
         )
-    )
 
     ax.yaxis.set_ticks(list(range(len(genome_lengths))))
     ax.tick_params(axis="y", which="both", length=0)
@@ -85,35 +86,30 @@ def plot(
     return fig, ax
 
 
-def plot_extract(
+def plot_extract_polygons(
     coords,
-    mums,
-    mum_bounds,
     other_coords,
     seq_idx,
     sequences: Sequence[int],
     seq_lengths: Sequence[int],
+    polygons,
+    colors,
     genome_labels: Sequence[str] | None = None,
     dark: bool = False,
 ) -> bytes:
     """
-    Render extract synteny to PNG bytes (window-relative coordinates).
-    ``sequences`` lists source sequence indices; plot rows are 0..len(sequences)-1.
-    """
-    i0, i1 = int(mum_bounds[0]), int(mum_bounds[1])
-    seq_list = [int(s) for s in sequences]
-    plot_mums = mums.slice_rows(i0, i1, seq_list)
-    for row_i, src_seq in enumerate(seq_list):
-        plot_mums.offset_starts_col(row_i, int(other_coords[src_seq][0]))
+    Render extract synteny from prebuilt polygon lists (window-relative coordinates).
 
+    ``sequences`` lists source sequence indices; plot rows are 0..len(sequences)-1.
+    Used by the browser when MUM bins are loaded progressively.
+    """
+    seq_list = [int(s) for s in sequences]
     ref_row = seq_list.index(int(seq_idx))
     ref_offset = int(other_coords[seq_idx][0])
     start = int(coords[0]) - ref_offset
     end = int(coords[1]) - ref_offset
 
     centering = [0] * len(seq_list)
-    poly, colors = viz_mums.get_mum_polygons(plot_mums, centering, inv_color="green")
-
     oc_sub = [other_coords[s] for s in seq_list]
     x_max = max(int(b) - int(a) for a, b in oc_sub)
     n_rows = len(seq_list)
@@ -123,7 +119,7 @@ def plot_extract(
 
     fig, ax = plot(
         genome_lengths,
-        poly,
+        polygons,
         colors,
         centering,
         xlims=(0, x_max),
@@ -155,3 +151,39 @@ def plot_extract(
 
     plt.close(fig)
     return buf.getvalue()
+
+
+def plot_extract(
+    coords,
+    mums,
+    mum_bounds,
+    other_coords,
+    seq_idx,
+    sequences: Sequence[int],
+    seq_lengths: Sequence[int],
+    genome_labels: Sequence[str] | None = None,
+    dark: bool = False,
+) -> bytes:
+    """
+    Render extract synteny to PNG bytes (window-relative coordinates).
+    ``sequences`` lists source sequence indices; plot rows are 0..len(sequences)-1.
+    """
+    i0, i1 = int(mum_bounds[0]), int(mum_bounds[1])
+    seq_list = [int(s) for s in sequences]
+    plot_mums = mums.slice_rows(i0, i1, seq_list)
+    for row_i, src_seq in enumerate(seq_list):
+        plot_mums.offset_starts_col(row_i, int(other_coords[src_seq][0]))
+
+    centering = [0] * len(seq_list)
+    poly, colors = viz_mums.get_mum_polygons(plot_mums, centering, inv_color="green")
+    return plot_extract_polygons(
+        coords,
+        other_coords,
+        seq_idx,
+        sequences,
+        seq_lengths,
+        poly,
+        colors,
+        genome_labels=genome_labels,
+        dark=dark,
+    )
