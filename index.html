@@ -478,9 +478,15 @@
     }
     document.documentElement.dataset.theme = getTheme();
     const t0 = performance.now();
+    let statusEpoch = 0;
     const status = (t, sub = "") => {
       $("status").textContent = t;
       $("substatus").textContent = sub;
+    };
+    const beginStatus = () => ++statusEpoch;
+    const statusAt = (epoch, t, sub = "") => {
+      if (epoch !== statusEpoch) return;
+      status(t, sub);
     };
     const secs = (tStart = t0) => ((performance.now() - tStart) / 1000).toFixed(1) + "s";
 
@@ -1569,16 +1575,17 @@ import synteny_plot
       }
       // Warm the bumbl index for this genome so subsequent Runs are faster.
       (async () => {
+        const epoch = beginStatus();
         const w0 = performance.now();
-        status("Loading genome index…", `seq ${seqIdx} (elapsed ${secs(w0)})`);
+        statusAt(epoch, "Loading genome index…", `seq ${seqIdx} (elapsed ${secs(w0)})`);
         try {
           await pyodide.runPythonAsync(`
 import app
 await app.warm_index(${seqIdx})
           `);
-          status("Ready.", `index cached for seq ${seqIdx}`);
+          statusAt(epoch, "Ready.", `index cached for seq ${seqIdx}`);
         } catch (e) {
-          status("Error", String(e?.message ?? e));
+          statusAt(epoch, "Error", String(e?.message ?? e));
         }
       })();
     });
@@ -1721,8 +1728,9 @@ await app.warm_index(${seqIdx})
       }
       const { seqIdx, contig, start, end } = v;
       const rangeStr = `${contig}:${start}-${end}`;
+      const epoch = beginStatus();
       const q0 = performance.now();
-      status("Querying…", `HTTP Range reads to S3 (query ${secs(q0)})`);
+      statusAt(epoch, "Querying…", `HTTP Range reads to S3 (query ${secs(q0)})`);
       $("out").value = "";
       $("bounds").textContent = "";
       showPlotButton(false);
@@ -1742,7 +1750,7 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
         );
         const result = JSON.parse(resultJson);
         if (result.error) {
-          status("Could not run query.", result.error);
+          statusAt(epoch, "Could not run query.", result.error);
           $("out").value = "";
           showPlotButton(false);
           showFastaDownloadButton(false);
@@ -1774,7 +1782,7 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
           b.push(`Margins: left ${result.margins.left}, right ${result.margins.right}`);
         }
         $("bounds").textContent = b.join(" | ");
-        status("Done.", `query ${secs(q0)}${mumSliceSummary ? ` | ${mumSliceSummary}` : ""}`);
+        statusAt(epoch, "Done.", `query ${secs(q0)}${mumSliceSummary ? ` | ${mumSliceSummary}` : ""}`);
         showPlotButton(true);
         showFastaDownloadButton(true);
         clearFastaSave();
@@ -1783,7 +1791,7 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
       } catch (err) {
         console.error(err);
         const msg = err?.message ?? String(err);
-        status("Error", msg);
+        statusAt(epoch, "Error", msg);
         $("out").value = "";
         showPlotButton(false);
         showFastaDownloadButton(false);
