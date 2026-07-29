@@ -338,6 +338,7 @@
 
   <div class="row">
     <button type="button" id="run" disabled>Run</button>
+    <button type="button" id="lucky" disabled title="Random assembly and region">I'm Feeling Lucky</button>
     <button type="button" id="plotBtn" disabled>Plot</button>
     <button type="button" id="fastaDownloadBtn" disabled>Build FASTA</button>
     <button type="button" id="fastaCancelBtn" hidden>Cancel</button>
@@ -354,6 +355,7 @@
       <p>Shredtools runs completely client-side. Downloading large regions across many assemblies may slow down your browser temporarily.</p>
       <ul>
         <li>Select a <strong>Genome</strong> and <strong>Contig</strong>, then set <strong>Start</strong> / <strong>End</strong>, or type a single <strong>Region</strong> (<code>CONTIG:start-end</code>). The contig dropdown applies to the start/end fields.</li>
+        <li><strong>I'm Feeling Lucky</strong> picks a random assembly and a random ~10–100&nbsp;kbp window, then runs the query.</li>
         <li>On CHM13 or GRCh38, pick a gene from the <strong>Gene</strong> list to auto-populate the region.</li>
         <li>After <strong>Build FASTA</strong>, click <strong>Save FASTA</strong> (or <strong>Save FASTA.gz</strong>) to download.</li>
         <li>FASTA download is available for HPRCr2 pangenomes only (<code>hprcv2_enhanced</code> / <code>hprcv2_merged</code>).</li>
@@ -1383,6 +1385,7 @@ base64.b64encode(data).decode()
       $("end").disabled = false;
       $("region").disabled = false;
       $("run").disabled = false;
+      $("lucky").disabled = false;
       $("lengthsHint").textContent = "";
       refreshRegionValidation();
       status("Lengths loaded. Set interval and click Run.", `elapsed ${secs()}`);
@@ -1506,6 +1509,7 @@ base64.b64encode(data).decode()
       $("genome").disabled = true;
       $("contig").disabled = true;
       $("run").disabled = true;
+      $("lucky").disabled = true;
       $("start").disabled = true;
       $("end").disabled = true;
       $("region").disabled = true;
@@ -1611,6 +1615,86 @@ await app.warm_index(${seqIdx})
       clearGeneIfUserEdit();
       updateRegionFromFields();
       refreshRegionValidation();
+    });
+
+    function randomInt(maxExclusive) {
+      return Math.floor(Math.random() * maxExclusive);
+    }
+
+    function pickWeightedIndex(weights) {
+      let total = 0;
+      for (const w of weights) total += w;
+      if (!(total > 0)) return 0;
+      let r = Math.random() * total;
+      for (let i = 0; i < weights.length; i++) {
+        r -= weights[i];
+        if (r <= 0) return i;
+      }
+      return weights.length - 1;
+    }
+
+    function pickLuckyInterval() {
+      const genomes = manifest?.genomes;
+      if (!genomes?.length) return null;
+      const g = genomes[randomInt(genomes.length)];
+      const lengths = (g.contig_lengths || []).map((x) => Number(x));
+      if (!g.contigs?.length || lengths.length !== g.contigs.length) return null;
+      // Length-weighted so short scaffolds are not over-sampled.
+      const minUseful = 1000;
+      const weights = lengths.map((L) => (Number.isFinite(L) && L >= minUseful ? L : 0));
+      const ci =
+        weights.some((w) => w > 0) ? pickWeightedIndex(weights) : randomInt(g.contigs.length);
+      const contig = g.contigs[ci];
+      const L = lengths[ci];
+      if (!(Number.isFinite(L) && L >= 1)) return null;
+      const maxWin = Math.min(100_000, L);
+      const minWin = Math.min(10_000, maxWin);
+      const win = minWin + randomInt(maxWin - minWin + 1);
+      const start = randomInt(L - win + 1);
+      return {
+        seqIdx: g.seq_idx,
+        contig,
+        start,
+        end: start + win,
+        label: prettyGenome(g.label),
+      };
+    }
+
+    function applyLuckyInterval(pick) {
+      if (!pick) return false;
+      suppressGeneClear = true;
+      suppressRegionSync = true;
+      try {
+        if ($("geneQuery").value) $("geneQuery").value = "";
+        $("genome").value = String(pick.seqIdx);
+        $("genome").dispatchEvent(new Event("change"));
+        $("contig").value = pick.contig;
+        $("start").value = String(pick.start);
+        $("end").value = String(pick.end);
+        $("region").value = `${prettyContig(pick.contig)}:${pick.start}-${pick.end}`;
+      } finally {
+        suppressGeneClear = false;
+        suppressRegionSync = false;
+      }
+      refreshRegionValidation();
+      return true;
+    }
+
+    $("lucky").addEventListener("click", () => {
+      if (!manifest) {
+        status("Still loading…");
+        return;
+      }
+      const pick = pickLuckyInterval();
+      if (!pick || !applyLuckyInterval(pick)) {
+        status("Could not pick a random region.");
+        return;
+      }
+      status(
+        "Feeling lucky…",
+        `${pick.label} ${prettyContig(pick.contig)}:${pick.start}-${pick.end}`
+      );
+      $("run").click();
     });
 
     $("run").addEventListener("click", async () => {
