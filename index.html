@@ -2741,14 +2741,14 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
         setPlotLoading(true, "Loading matplotlib…");
         status("Plotting…", "loading matplotlib if needed");
         await ensureMpl();
-        setPlotLoading(true, "Rendering synteny plot…");
+        setPlotLoading(true, "Fetching MUM bins for plot…");
         status("Plotting…", `matplotlib ready (${secs(q0)})`);
         const seqs = getSelectedSeqIndices();
         const dark = document.documentElement.dataset.theme === "dark";
         const plotJson = String(
           await pyodide.runPythonAsync(`
 import app
-app.plot_extract_png(${JSON.stringify(seqs)}, ${dark ? "True" : "False"})
+await app.plot_extract_png(${JSON.stringify(seqs)}, ${dark ? "True" : "False"})
           `)
         );
         const plotResult = JSON.parse(plotJson);
