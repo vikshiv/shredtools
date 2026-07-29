@@ -571,9 +571,11 @@
     const pyodide = await loadPyodide();
     // No micropip installs needed: we vendor the tiny mumemto subset we need.
     const base = new URL(".", import.meta.url).href;
+    // Bust CDN/browser caches of MEMFS sources (GitHub Pages often serves stale .py).
+    const _assetQ = `v=${Date.now()}`;
     status("Loading app code…", `fetching local scripts (elapsed ${secs()})`);
-    const uRes = await fetch(new URL("bumbl_index_utils.py", base));
-    const aRes = await fetch(new URL("app.py", base));
+    const uRes = await fetch(new URL(`bumbl_index_utils.py?${_assetQ}`, base), { cache: "no-store" });
+    const aRes = await fetch(new URL(`app.py?${_assetQ}`, base), { cache: "no-store" });
     if (!uRes.ok) throw new Error("Could not load bumbl_index_utils.py (serve this folder over HTTP, not file://).");
     if (!aRes.ok) throw new Error("Could not load app.py.");
     const [uText, aText] = [await uRes.text(), await aRes.text()];
@@ -584,6 +586,9 @@
 import sys
 if "/" not in sys.path:
     sys.path.insert(0, "/")
+# Ensure a fresh import after writing MEMFS sources (avoids stale module cache).
+for _mod in ("app", "bumbl_index_utils"):
+    sys.modules.pop(_mod, None)
     `);
     await pyodide.runPythonAsync("import app");
 
@@ -642,16 +647,22 @@ base64.b64encode(data).decode()
       if (!plotModulesReady) {
         plotModulesReady = (async () => {
           const plotBase = new URL(".", import.meta.url).href;
+          const plotQ = `v=${Date.now()}`;
           const [vRes, sRes] = await Promise.all([
-            fetch(new URL("viz_mums.py", plotBase)),
-            fetch(new URL("synteny_plot.py", plotBase)),
+            fetch(new URL(`viz_mums.py?${plotQ}`, plotBase), { cache: "no-store" }),
+            fetch(new URL(`synteny_plot.py?${plotQ}`, plotBase), { cache: "no-store" }),
           ]);
           if (!vRes.ok) throw new Error("Could not load viz_mums.py.");
           if (!sRes.ok) throw new Error("Could not load synteny_plot.py.");
           const [vText, sText] = await Promise.all([vRes.text(), sRes.text()]);
           pyodide.FS.writeFile("/viz_mums.py", vText);
           pyodide.FS.writeFile("/synteny_plot.py", sText);
-          await pyodide.runPythonAsync("import synteny_plot");
+          await pyodide.runPythonAsync(`
+import sys
+for _mod in ("viz_mums", "synteny_plot"):
+    sys.modules.pop(_mod, None)
+import synteny_plot
+          `);
         })();
       }
       return plotModulesReady;
@@ -1892,8 +1903,12 @@ await app.run_with_bounds(${seqIdx}, ${JSON.stringify(rangeStr)}, None)
         const dark = document.documentElement.dataset.theme === "dark";
         const plotJson = String(
           await pyodide.runPythonAsync(`
+import inspect
 import app
-await app.plot_extract_png(${JSON.stringify(seqs)}, ${dark ? "True" : "False"})
+_result = app.plot_extract_png(${JSON.stringify(seqs)}, ${dark ? "True" : "False"})
+if inspect.isawaitable(_result):
+    _result = await _result
+_result
           `)
         );
         const plotResult = JSON.parse(plotJson);
