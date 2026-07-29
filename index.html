@@ -1417,6 +1417,33 @@ app.register_custom_pangenome(
       tab.loadError = null;
     }
 
+    async function getActivePangenomeKey() {
+      return String(await pyodide.runPythonAsync("import app; app.ACTIVE_PANGENOME"));
+    }
+
+    async function setActivePangenomeKey(key) {
+      await pyodide.runPythonAsync(`import app; app.set_active_pangenome(${JSON.stringify(key)})`);
+    }
+
+    /** Invalidate query UI so Run cannot use a stale manifest after a failed switch. */
+    function markQueryUiUnloaded(hint) {
+      manifest = null;
+      selectedSeqs = null;
+      $("genome").innerHTML = "";
+      $("contig").innerHTML = "";
+      $("genome").disabled = true;
+      $("contig").disabled = true;
+      $("start").disabled = true;
+      $("end").disabled = true;
+      $("region").disabled = true;
+      $("run").disabled = true;
+      $("lucky").disabled = true;
+      if (hint) $("lengthsHint").textContent = hint;
+      setGeneUiVisible(false);
+      showPlotButton(false);
+      showFastaDownloadButton(false);
+    }
+
     async function switchToTab(tabId) {
       if (switchingTab) return;
       if (tabId === ADD_TAB_ID) {
@@ -1429,6 +1456,7 @@ app.register_custom_pangenome(
       const tab = datasetTabs.find((t) => t.id === tabId);
       if (!tab) return;
       switchingTab = true;
+      const prevPyKey = await getActivePangenomeKey();
       try {
         activeTabId = tab.id;
         renderSidebar();
@@ -1455,16 +1483,14 @@ app.register_custom_pangenome(
           } catch (e) {
             tab.loadError = String(e?.message ?? e);
             tab.registered = false;
-            manifest = null;
-            $("lengthsHint").textContent = "Dataset failed to load.";
+            markQueryUiUnloaded("Dataset failed to load.");
             status("Could not load dataset.", tab.loadError);
-            setGeneUiVisible(false);
             return;
           }
         }
         if (tab.loadError && !tab.registered) {
+          markQueryUiUnloaded("Dataset failed to load.");
           status("Could not load dataset.", tab.loadError);
-          setGeneUiVisible(false);
           return;
         }
         if (tab.annotationJson) {
@@ -1473,14 +1499,25 @@ app.register_custom_pangenome(
         } else {
           setGeneUiVisible(false);
         }
-        await pyodide.runPythonAsync(`import app; app.set_active_pangenome(${JSON.stringify(tab.pyKey)})`);
-        await initLengthsUI();
-        if (tab.annotationJson) {
-          setGeneUiVisible(true);
-          $("geneQuery").value = "";
-          await loadGeneIndexFromAnnotation($("build").value);
-        } else {
-          setGeneUiVisible(false);
+        await setActivePangenomeKey(tab.pyKey);
+        try {
+          await initLengthsUI();
+          if (tab.annotationJson) {
+            setGeneUiVisible(true);
+            $("geneQuery").value = "";
+            await loadGeneIndexFromAnnotation($("build").value);
+          } else {
+            setGeneUiVisible(false);
+          }
+        } catch (e) {
+          // Roll back Python so ACTIVE_PANGENOME cannot disagree with JS manifest.
+          try {
+            if (prevPyKey && prevPyKey !== tab.pyKey) await setActivePangenomeKey(prevPyKey);
+          } catch (_) {
+            /* ignore */
+          }
+          markQueryUiUnloaded("Dataset switch failed (see status).");
+          throw e;
         }
         showFastaDownloadButton(false);
         status("Ready.", tab.label);
@@ -2369,8 +2406,19 @@ import synteny_plot
       const opt = pangenomeList.find((o) => o.key === key);
       if (!opt) throw new Error(`Unknown pangenome: ${key}`);
       status("Switching pangenome…", opt.label);
-      await pyodide.runPythonAsync(`import app; app.set_active_pangenome(${JSON.stringify(key)})`);
-      await initLengthsUI();
+      const prevPyKey = await getActivePangenomeKey();
+      await setActivePangenomeKey(key);
+      try {
+        await initLengthsUI();
+      } catch (e) {
+        try {
+          if (prevPyKey && prevPyKey !== key) await setActivePangenomeKey(prevPyKey);
+        } catch (_) {
+          /* ignore */
+        }
+        markQueryUiUnloaded("Pangenome switch failed (see status).");
+        throw e;
+      }
     }
 
     function updateSeqSummary() {

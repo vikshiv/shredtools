@@ -209,12 +209,13 @@ def pangenome_options_json() -> str:
 
 
 def set_active_pangenome(key: str) -> None:
-    """Switch active bumbl/bi pair; clears index cache only (lengths stay in the loaded bundle)."""
-    global ACTIVE_PANGENOME
+    """Switch active bumbl/bi pair; clears index cache and last extract (lengths stay in the bundle)."""
+    global ACTIVE_PANGENOME, _LAST_EXTRACT
     if key not in PANGENOMES:
         raise ValueError(f"Unknown pangenome {key!r}")
     ACTIVE_PANGENOME = key
     _INDEX_BY_SEQ.clear()
+    _LAST_EXTRACT = None
 
 
 def _active_bumbl_bi() -> str:
