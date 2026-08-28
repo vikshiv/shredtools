@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Shredtools HPRC</title>
+  <title>Shredtools - HPRC</title>
   <style>
     :root {
       font-family: system-ui, sans-serif;
@@ -534,7 +534,7 @@
 
   <div id="viewQuery">
   <img class="logo" src="shredtools_logo.png" alt="Shredtools logo" />
-  <h1>Shredtools extract</h1>
+  <h1 id="appTitle">Shredtools extract - HPRC</h1>
   <div class="row" id="customDatasetRemoveRow">
     <button type="button" id="removeCustomDataset">Remove this dataset</button>
   </div>
@@ -738,9 +738,90 @@
     const THEME_KEY = "shredtools-theme";
     const CUSTOM_DATASETS_KEY = "shredtools.customDatasets";
     const HUMAN_TAB_ID = "human";
+    const CICHLID_TAB_ID = "cichlid";
     const ADD_TAB_ID = "__add__";
 
     const HUMAN_EMOJI = "🧍";
+    const CICHLID_EMOJI = "🐟";
+    const CICHLID_BUMBL_URL =
+      "https://ftp.ebi.ac.uk/pub/databases/metagenomics/research-team/shivakumar/cichlids.bumbl";
+
+    const ROUTE_BY_TAB = {
+      [HUMAN_TAB_ID]: "hprc",
+      [CICHLID_TAB_ID]: "cichlid",
+    };
+    const TAB_BY_ROUTE = {
+      hprc: HUMAN_TAB_ID,
+      cichlid: CICHLID_TAB_ID,
+    };
+
+    function pathnameLastSegment() {
+      let p = location.pathname.replace(/\/+$/, "");
+      if (p.endsWith("/index.html")) p = p.slice(0, -"/index.html".length);
+      const parts = p.split("/").filter(Boolean);
+      return (parts[parts.length - 1] || "").toLowerCase();
+    }
+
+    function isRoutedPath() {
+      const last = pathnameLastSegment();
+      return last === "hprc" || last === "cichlid";
+    }
+
+    function appBasePath() {
+      let p = location.pathname.replace(/\/+$/, "");
+      if (p.endsWith("/index.html")) p = p.slice(0, -"/index.html".length);
+      const parts = p.split("/").filter(Boolean);
+      const last = (parts[parts.length - 1] || "").toLowerCase();
+      if (last === "hprc" || last === "cichlid") parts.pop();
+      return parts.length ? "/" + parts.join("/") : "";
+    }
+
+    function urlForRoute(route) {
+      const base = appBasePath();
+      return `${base}/${route}`.replace(/\/{2,}/g, "/");
+    }
+
+    function routeFromLocation() {
+      const forced = String(window.__SHREDTOOLS_ROUTE__ || "").trim().toLowerCase();
+      if (forced && TAB_BY_ROUTE[forced]) return forced;
+      const last = pathnameLastSegment();
+      if (TAB_BY_ROUTE[last]) return last;
+      return ROUTE_BY_TAB[HUMAN_TAB_ID];
+    }
+
+    function tabIdFromRoute(route) {
+      return TAB_BY_ROUTE[route] || HUMAN_TAB_ID;
+    }
+
+    function appAssetBase() {
+      if (isRoutedPath()) return new URL("../", location.href).href;
+      return new URL(".", import.meta.url).href;
+    }
+
+    function updateDocumentTitle(tab) {
+      if (!tab) return;
+      let suffix;
+      if (tab.kind === "human") suffix = "HPRC";
+      else if (tab.id === CICHLID_TAB_ID) suffix = "Cichlid";
+      else suffix = tab.label;
+      const pageTitle = `Shredtools extract - ${suffix}`;
+      document.title = `Shredtools - ${suffix}`;
+      const h1 = $("appTitle");
+      if (h1) h1.textContent = pageTitle;
+    }
+
+    function updateBrowserRoute(tabId, { replace = false } = {}) {
+      const route = ROUTE_BY_TAB[tabId];
+      if (!route) return;
+      const targetPath = urlForRoute(route);
+      const currentPath = location.pathname.replace(/\/+$/, "") || "/";
+      const targetNorm = targetPath.replace(/\/+$/, "") || "/";
+      if (currentPath === targetNorm) return;
+      const target = targetPath + location.search + location.hash;
+      const state = { tabId };
+      if (replace) history.replaceState(state, "", target);
+      else history.pushState(state, "", target);
+    }
 
     function getTheme() {
       return localStorage.getItem(THEME_KEY) || "dark";
@@ -935,7 +1016,7 @@
     status("Loading Pyodide…", `elapsed ${secs()}`);
     const pyodide = await loadPyodide();
     // No micropip installs needed: we vendor the tiny mumemto subset we need.
-    const base = new URL(".", import.meta.url).href;
+    const base = appAssetBase();
     // Bust CDN/browser caches of MEMFS sources (GitHub Pages often serves stale .py).
     const _assetQ = `v=${Date.now()}`;
     status("Loading app code…", `fetching local scripts (elapsed ${secs()})`);
@@ -1006,8 +1087,23 @@ base64.b64encode(data).decode()
     let mplReady = null;
     let plotModulesReady = null;
 
-    /** @type {{ id: string, kind: "human"|"custom", label: string, bumblUrl?: string, lengthsUrl?: string, biUrl?: string, annotationUrl?: string, pyKey?: string, annotationJson?: object|null, loadError?: string|null, registered?: boolean }} */
-    let datasetTabs = [{ id: HUMAN_TAB_ID, kind: "human", label: "Human" }];
+    /** @type {{ id: string, kind: "human"|"builtin"|"custom", label: string, emoji?: string, bumblUrl?: string, lengthsUrl?: string, biUrl?: string, annotationUrl?: string, pyKey?: string, annotationJson?: object|null, loadError?: string|null, registered?: boolean }} */
+    let datasetTabs = [
+      { id: HUMAN_TAB_ID, kind: "human", label: "Human" },
+      {
+        id: CICHLID_TAB_ID,
+        kind: "builtin",
+        label: "Cichlid",
+        emoji: CICHLID_EMOJI,
+        bumblUrl: CICHLID_BUMBL_URL,
+        lengthsUrl: CICHLID_BUMBL_URL.replace(/\.bumbl$/i, ".lengths"),
+        biUrl: `${CICHLID_BUMBL_URL}.bi`,
+        pyKey: "builtin_cichlid",
+        annotationJson: null,
+        loadError: null,
+        registered: false,
+      },
+    ];
     let activeTabId = HUMAN_TAB_ID;
     let lengthsUrlTouched = false;
     let switchingTab = false;
@@ -1444,7 +1540,7 @@ app.register_custom_pangenome(
       showFastaDownloadButton(false);
     }
 
-    async function switchToTab(tabId) {
+    async function switchToTab(tabId, { fromPopstate = false } = {}) {
       if (switchingTab) return;
       if (tabId === ADD_TAB_ID) {
         activeTabId = ADD_TAB_ID;
@@ -1463,6 +1559,10 @@ app.register_custom_pangenome(
         setMainView("query");
         clearQueryResults();
         setCustomRemoveVisible(tab.kind === "custom");
+        updateDocumentTitle(tab);
+        if (!fromPopstate && (tab.kind === "human" || tab.kind === "builtin")) {
+          updateBrowserRoute(tab.id);
+        }
 
         if (tab.kind === "human") {
           setHumanUiChrome(true);
@@ -1477,7 +1577,7 @@ app.register_custom_pangenome(
 
         setHumanUiChrome(false);
         if (!tab.registered || !tab.assemblyLabels?.length) {
-          status("Loading custom dataset…", tab.label);
+          status("Loading dataset…", tab.label);
           try {
             await registerCustomInPython(tab);
           } catch (e) {
@@ -1589,7 +1689,7 @@ app.register_custom_pangenome(
         });
       }
       // Eagerly try to register so tabs are ready; keep failures for on-select.
-      for (const tab of datasetTabs.filter((t) => t.kind === "custom")) {
+      for (const tab of datasetTabs.filter((t) => t.kind === "custom" || t.kind === "builtin")) {
         try {
           await registerCustomInPython(tab);
         } catch (err) {
@@ -1606,7 +1706,7 @@ app.register_custom_pangenome(
     async function ensurePlotModules() {
       if (!plotModulesReady) {
         plotModulesReady = (async () => {
-          const plotBase = new URL(".", import.meta.url).href;
+          const plotBase = appAssetBase();
           const plotQ = `v=${Date.now()}`;
           const [vRes, sRes] = await Promise.all([
             fetch(new URL(`viz_mums.py?${plotQ}`, plotBase), { cache: "no-store" }),
@@ -2979,12 +3079,11 @@ _result
         renderSidebar();
         await restoreCustomDatasetsOnBoot();
         void ensureEmojiSelect();
-        await loadPangenomeAndInitUI(ps.value);
-        setHumanUiChrome(true);
-        setCustomRemoveVisible(false);
-        activeTabId = HUMAN_TAB_ID;
-        renderSidebar();
-        status("Ready.", `elapsed ${secs()}`);
+        if (!isRoutedPath()) {
+          updateBrowserRoute(HUMAN_TAB_ID, { replace: true });
+        }
+        const initialTabId = tabIdFromRoute(routeFromLocation());
+        await switchToTab(initialTabId, { fromPopstate: true });
       } catch (e) {
         $("lengthsHint").textContent = "Could not load pangenome_lengths.json or init UI.";
         status("Error", String(e?.message ?? e));
@@ -3059,6 +3158,12 @@ _result
 
     $("removeCustomDataset").addEventListener("click", () => {
       void removeActiveCustomDataset();
+    });
+
+    window.addEventListener("popstate", () => {
+      if (activeTabId === ADD_TAB_ID) return;
+      const tabId = tabIdFromRoute(routeFromLocation());
+      if (tabId !== activeTabId) void switchToTab(tabId, { fromPopstate: true });
     });
   </script>
 </body>

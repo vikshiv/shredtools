@@ -4,7 +4,7 @@
 
 This branch hosts a small, static, in-browser UI for running `shredtools extract` queries against precomputed multi-MUM indexes for pangenomes from the Human Pangenome Reference Consortium (HPRC). It runs entirely client-side via Pyodide and reads the index/MUM data from public S3 using HTTP Range requests.
 
-**Browser link:** [https://vikshiv.github.io/shredtools/](https://vikshiv.github.io/shredtools/)
+**Browser link:** [https://vikshiv.github.io/shredtools/hprc](https://vikshiv.github.io/shredtools/hprc)
 
 ---
 
