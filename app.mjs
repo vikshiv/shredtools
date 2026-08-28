@@ -563,6 +563,10 @@ base64.b64encode(data).decode()
       return activeTabId === HUMAN_TAB_ID;
     }
 
+    function tabHasGeneAnnotations(tab) {
+      return (tab?.kind === "custom" || tab?.kind === "builtin") && !!tab.annotationJson;
+    }
+
     function defaultLengthsUrl(bumblUrl) {
       const s = String(bumblUrl || "").trim();
       if (/\.bumbl$/i.test(s)) return s.replace(/\.bumbl$/i, ".lengths");
@@ -1761,7 +1765,7 @@ import synteny_plot
       const jsonStr = String(await pyodide.runPythonAsync(`import app; app.describe_ui()`));
       manifest = JSON.parse(jsonStr);
       const tab = activeTab();
-      if (tab?.kind === "custom" && tab.assemblyLabels?.length) {
+      if (tabHasGeneAnnotations(tab)) {
         applyAssemblyLabelsToManifest(manifest, tab.assemblyLabels);
       }
       fillGenomeOptions();
@@ -1940,14 +1944,11 @@ import synteny_plot
       if (selectedSeqs) renderSeqList();
       const seqIdx = parseInt($("genome").value, 10);
       const tab = activeTab();
-      if (tab?.kind === "custom") {
-        if (tab.annotationJson && !syncingBuildGenome) {
+      if (tabHasGeneAnnotations(tab)) {
+        if (!syncingBuildGenome) {
           setGeneUiVisible(true);
-          // Keep current build selection; do not force-hide.
-        } else if (!tab.annotationJson) {
-          setGeneUiVisible(false);
         }
-      } else {
+      } else if (tab?.kind === "human") {
         const build = seqIdxToBuild[seqIdx];
         const eligible = build != null;
         setGeneUiVisible(eligible);
@@ -1962,6 +1963,8 @@ import synteny_plot
           $("geneQuery").value = "";
           loadGeneIndexForBuild(build);
         }
+      } else {
+        setGeneUiVisible(false);
       }
       // Warm the bumbl index for this genome so subsequent Runs are faster.
       (async () => {
@@ -1984,11 +1987,12 @@ await app.warm_index(${seqIdx})
       if (!manifest) return;
       const build = $("build").value;
       const tab = activeTab();
-      if (tab?.kind === "custom") {
+      if (tabHasGeneAnnotations(tab)) {
         $("geneQuery").value = "";
         await loadGeneIndexFromAnnotation(build);
         return;
       }
+      if (tab?.kind !== "human") return;
       const seqIdx = buildToSeqIdx[build];
       if (!syncingBuildGenome && Number.isFinite(seqIdx)) {
         syncingBuildGenome = true;
