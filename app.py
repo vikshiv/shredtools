@@ -10,7 +10,7 @@ _S3_MUMEMTO = "https://genome-idx.s3.amazonaws.com/mumemto"
 _S3_HPRC_ASSEMBLIES = "https://human-pangenomics.s3.us-west-2.amazonaws.com/"
 
 # Each preset: .bumbl, .bumbl.bi, and .lengths on S3. Contig/length metadata for the browser
-# also lives in ``pangenome_lengths.json`` (built with ``lengths_to_json.py``).
+# also lives in ``data/pangenome_lengths.json`` (built with ``lengths_to_json.py``).
 # Order preserved for dropdown: enhanced default, then HPRCr2 merged, then HPRCr1.
 PANGENOMES: dict[str, dict[str, str]] = {
     "hprcv2_enhanced": {
@@ -91,7 +91,7 @@ INTRO = _build_intro()
 
 ACTIVE_PANGENOME = "hprcv2_enhanced"
 
-# Loaded once from ``pangenome_lengths.json`` (keys match ``PANGENOMES``).
+# Loaded once from ``data/pangenome_lengths.json`` (keys match ``PANGENOMES``).
 _LENGTHS_BUNDLE: dict | None = None
 # Index cache: "pangenome_key:seq_idx" → parsed multi-index document.
 _INDEX_BY_SEQ: dict = {}

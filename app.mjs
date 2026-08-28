@@ -331,10 +331,10 @@ base64.b64encode(data).decode()
       return bytesFromB64(b64);
     });
 
-    const jRes = await fetch(new URL("pangenome_lengths.json", base));
+    const jRes = await fetch(new URL("data/pangenome_lengths.json", base));
     if (!jRes.ok) {
       throw new Error(
-        `Missing pangenome_lengths.json (HTTP ${jRes.status}). Build it with lengths_to_json.py (see docstring in that file).`
+        `Missing data/pangenome_lengths.json (HTTP ${jRes.status}). Build it with lengths_to_json.py (see docstring in that file).`
       );
     }
     const jBuf = await jRes.arrayBuffer();
@@ -355,7 +355,7 @@ base64.b64encode(data).decode()
     let lastFastaGzip = false;
     let geneIndex = null; // { [gene: string]: Array<{contig,start,end,label}> }
     let pangenomeList = null;
-    /** Lengths: ``pangenome_lengths.json`` → MEMFS → ``app.load_lengths_bundle_path``. */
+    /** Lengths: ``data/pangenome_lengths.json`` → MEMFS → ``app.load_lengths_bundle_path``. */
     let mplReady = null;
     let plotModulesReady = null;
 
@@ -470,7 +470,7 @@ base64.b64encode(data).decode()
       emojiSelectReady = (async () => {
         const hint = $("addEmojiHint");
         try {
-          const res = await fetch(new URL("emoji-by-group.json", base));
+          const res = await fetch(new URL("data/emoji-by-group.json", base));
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const groups = await res.json();
           const catalog = [];
@@ -1397,8 +1397,8 @@ import synteny_plot
       11: "GRCh38",
     };
     const buildToGeneJson = {
-      "CHM13v2.0": "annotations.genes.chm13.json",
-      "GRCh38": "annotations.genes.grch38.json",
+      "CHM13v2.0": "data/annotations.genes.chm13.json",
+      "GRCh38": "data/annotations.genes.grch38.json",
     };
     let syncingBuildGenome = false;
     let suppressGeneClear = false;
@@ -2357,7 +2357,7 @@ _result
         const initialTabId = tabIdFromRoute(routeFromLocation());
         await switchToTab(initialTabId, { fromPopstate: true });
       } catch (e) {
-        $("lengthsHint").textContent = "Could not load pangenome_lengths.json or init UI.";
+        $("lengthsHint").textContent = "Could not load data/pangenome_lengths.json or init UI.";
         status("Error", String(e?.message ?? e));
       } finally {
         $("pangenome").disabled = false;

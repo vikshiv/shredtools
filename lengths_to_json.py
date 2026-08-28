@@ -6,9 +6,9 @@ Convert multilengths ``.lengths`` files to JSON for tooling / the Pyodide browse
 
     conda run -n shredtools python lengths_to_json.py -i path/to/index.lengths -o one.json
 
-**Merged bundle** (e.g. ``pangenome_lengths.json`` for the browser) — top-level keys, each value is that same shape::
+**Merged bundle** (e.g. ``data/pangenome_lengths.json`` for the browser) — top-level keys, each value is that same shape::
 
-    conda run -n shredtools python lengths_to_json.py -o pangenome_lengths.json \\
+    conda run -n shredtools python lengths_to_json.py -o data/pangenome_lengths.json \\
       --preset hprcv2_enhanced=~/vast/shredtools/index/hprcv2_enhanced_merged.lengths \\
       --preset hprcv2_merged=~/vast/shredtools/index/hprcv2_merged.lengths \\
       --preset hprcv1=~/vast/shredtools/index/hprcv1.lengths

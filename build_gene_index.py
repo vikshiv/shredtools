@@ -258,8 +258,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument(
         "--output",
         "-o",
-        default="annotations.genes.json",
-        help="Output JSON path (default: annotations.genes.json). Use '-' for stdout.",
+        default="data/annotations.genes.json",
+        help="Output JSON path (default: data/annotations.genes.json). Use '-' for stdout.",
     )
     ap.add_argument(
         "--output-coords",
