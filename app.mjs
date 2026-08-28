@@ -18,6 +18,10 @@ const $ = (id) => document.getElementById(id);
     const CICHLID_EMOJI = "🐟";
     const CICHLID_BUMBL_URL =
       "https://ftp.ebi.ac.uk/pub/databases/metagenomics/research-team/shivakumar/cichlids.bumbl";
+    const CICHLID_ANNOTATION_URL = new URL(
+      "data/cichlid.annotations.genes.json",
+      import.meta.url
+    ).href;
 
     const ROUTE_BY_TAB = {
       [HUMAN_TAB_ID]: "hprc",
@@ -371,6 +375,7 @@ base64.b64encode(data).decode()
         lengthsUrl: CICHLID_BUMBL_URL.replace(/\.bumbl$/i, ".lengths"),
         biUrl: `${CICHLID_BUMBL_URL}.bi`,
         pyKey: "builtin_cichlid",
+        annotationUrl: CICHLID_ANNOTATION_URL,
         annotationJson: null,
         loadError: null,
         registered: false,
