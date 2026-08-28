@@ -14,6 +14,9 @@
         return res.text();
       })
       .then(function (html) {
+        if (!/<base\s/i.test(html)) {
+          html = html.replace(/<head(\s[^>]*)?>/i, '<head$1><base href="../">');
+        }
         document.open();
         document.write(html);
         document.close();
