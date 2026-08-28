@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shredtools</title>
+</head>
+<body>
+  <script>
+    (function () {
+      var path = location.pathname.replace(/\/+$/, "");
+      var slash = path.lastIndexOf("/");
+      var base = slash >= 0 ? path.slice(0, slash + 1) : "/";
+      var seg = (slash >= 0 ? path.slice(slash + 1) : path).toLowerCase();
+      if (seg === "cichlid") window.__SHREDTOOLS_ROUTE__ = "cichlid";
+      else if (seg === "hprc") window.__SHREDTOOLS_ROUTE__ = "hprc";
+      fetch(base + "index.html", { cache: "no-store" })
+        .then(function (res) {
+          if (!res.ok) throw new Error("Could not load app (HTTP " + res.status + ").");
+          return res.text();
+        })
+        .then(function (html) {
+          document.open();
+          document.write(html);
+          document.close();
+        })
+        .catch(function (err) {
+          document.body.textContent =
+            "Failed to load Shredtools: " + (err && err.message ? err.message : err);
+        });
+    })();
+  </script>
+</body>
+</html>

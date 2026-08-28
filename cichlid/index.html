@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shredtools - Cichlid</title>
+  <script>window.__SHREDTOOLS_ROUTE__ = "cichlid";</script>
+</head>
+<body>
+  <script>
+    fetch("../index.html", { cache: "no-store" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("Could not load app (HTTP " + res.status + ").");
+        return res.text();
+      })
+      .then(function (html) {
+        document.open();
+        document.write(html);
+        document.close();
+      })
+      .catch(function (err) {
+        document.body.textContent = "Failed to load Shredtools: " + (err && err.message ? err.message : err);
+      });
+  </script>
+</body>
+</html>
