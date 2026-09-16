@@ -12,11 +12,15 @@ Shredtools expects a set of multi-MUMs in a `.bumbl` file (use `mumemto -b` or `
 
 ---
 
+
+
 ## Installation
+
+
 
 ### Conda (recommended)
 
-Requires [mumemto](https://github.com/vikshiv/mumemto) at runtime. The Bioconda package installs both shredtools and mumemto. Python 3.9+.
+Requires [mumemto](https://github.com/vikshiv/mumemto) at runtime. The Bioconda package installs both shredtools and mumemto. Python 3.10–3.13 (mumemto requires `>=3.10`; shredtools itself is `>=3.9`). Installs all dependencies.
 
 ```bash
 conda create -n shredtools_env python=3.10
@@ -24,6 +28,8 @@ conda activate shredtools_env
 conda install -c conda-forge -c bioconda shredtools
 shredtools -h
 ```
+
+
 
 ### From source (development)
 
@@ -34,15 +40,19 @@ pip install -e .
 shredtools -h
 ```
 
-Install [mumemto](https://github.com/vikshiv/mumemto) separately (Bioconda, or `git clone` + `pip install .` from source).
+Install [mumemto](https://github.com/vikshiv/mumemto) `>=1.3.4` separately (Bioconda, or `git clone` + `pip install .` from source).
 
 You can also run `python -m shredtools`.
 
-**Dependencies:** `numpy`, `pysam`, `tqdm` (plus mumemto at runtime)
+**Dependencies:** `numpy`, `pysam`, `tqdm`, and `mumemto >=1.3.4`
 
 **Optional:** `matplotlib` (for `extract --plot` / `--plot-full`; included in the Bioconda package); `.fai` indexes beside reference FASTAs, or the `agc` tool (`fasta --agc`) for sequence extraction (can be installed via bioconda).
 
+**System:** Linux or macOS; Conda installs work with Python 3.10–3.13. Tested on macOS and Linux with Python 3.10. Typical install time: ~5 seconds on a macbook pro.
+
 ---
+
+
 
 ## Quick start
 
@@ -65,7 +75,11 @@ shredtools fasta regions/prefix.bed -o fasta_out/
 
 ---
 
+
+
 ## Getting started
+
+
 
 ### Index a `.bumbl` file
 
@@ -125,6 +139,8 @@ shredtools subset https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000
 
 ---
 
+
+
 ### Extract homologous regions
 
 Given a query interval on one pangenome sequence, `extract` finds the bounding multi-MUMs and reports the syntenic interval on each selected genome as BED. Input files can be remote URLs (see the [Index Zone](https://benlangmead.github.io/aws-indexes/mumemto) for pre-built indexes over HPRC2).
@@ -132,10 +148,10 @@ Given a query interval on one pangenome sequence, `extract` finds the bounding m
 **Required inputs**
 
 
-| File                 | Description                                                      |
-| -------------------- | ---------------------------------------------------------------- |
-| `pangenome.bumbl`    | Positional argument; local path or HTTP(S) URL                     |
-| `pangenome.bumbl.bi` | Default: `<mum_file>.bi`, or `-b`; local path or HTTP(S) URL     |
+| File                 | Description                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| `pangenome.bumbl`    | Positional argument; local path or HTTP(S) URL                                              |
+| `pangenome.bumbl.bi` | Default: `<mum_file>.bi`, or `-b`; local path or HTTP(S) URL                                |
 | `pangenome.lengths`  | Default: `<stem>.lengths`, or `-l`; local path or HTTP(S) URL (mumemto multilengths format) |
 
 
@@ -171,9 +187,14 @@ shredtools extract pangenome.coll.bumbl -s 0 -r chr1:1-50000 -x 0 1 2
 shredtools extract pangenome.coll.bumbl -s 0 -r chr1:1000000-2000000 \
   -o regions/prefix -l pangenome.lengths --plot
 
-# Remote .bumbl only (auto-detects .bumbl.bi and .lengths in the same directory)
-shredtools extract https://url/to/pangenome.bumbl -s 0 -r chr1:1-1000
+# Demo: BRCA1 (CHM13) on pre-built HPRCv2 index (~1 s; writes brca1.bed)
+# .bumbl.bi is auto-detected; lengths must be passed explicitly for this index
+shredtools extract https://genome-idx.s3.amazonaws.com/mumemto/hprc/hprcv2_enhanced_merged.bumbl \
+  -l https://genome-idx.s3.amazonaws.com/mumemto/hprc/hprcv2.lengths \
+  -s 0 -r CHM13#0#chr17:43902856-43983996 -o brca1
 ```
+
+Expected output: `brca1.bed` — one BED line per assembly (`contig start end path`); stderr may report left/right margins.
 
 When the query interval does not align exactly to MUM boundaries, `extract` prints `left margin` and/or `right margin` on stderr (distance in bp from the query edge to the enclosing MUM). This serves as a guide for the bounding region around the extracted regions.
 
@@ -199,6 +220,8 @@ shredtools fasta regions/prefix.bed -o fasta_out/ --agc archive.agc -t 8
 
 ---
 
+
+
 ## Other commands
 
 
@@ -218,6 +241,8 @@ shredtools fasta regions/prefix.bed -o fasta_out/ --agc archive.agc -t 8
 Run `shredtools <command> -h` for full options.
 
 ---
+
+
 
 ## Getting help
 
