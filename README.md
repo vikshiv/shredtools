@@ -73,6 +73,8 @@ shredtools fasta regions/prefix.bed -o fasta_out/
 > [!TIP]  
 > You can overwrite the original `bumbl` file with `-i`
 
+For a real example on pre-built HPRC data, see [More examples](#more-examples).
+
 ---
 
 
@@ -177,7 +179,7 @@ shredtools extract pangenome.coll.bumbl \
 > [!TIP]
 > A `lengths` file or `bumbl.bi` index can be passed in with `-l` or `-b` respectively, if not automatically detected with the same input prefix.
 
-**More examples**
+### More examples
 
 ```bash
 # BED to stdout; only genomes 0, 1, 2
