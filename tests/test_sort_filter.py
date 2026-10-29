@@ -72,3 +72,30 @@ def test_filter_partial_drops_absent_starts(tmp_path):
     out = filter_partial_mums(mums)
     assert len(out) == 2
     assert not np.any(out.starts == -1)
+
+
+def test_filter_partial_inplace_preserves_mums_text(tmp_path):
+    import numpy as np
+    import mumemto.utils as mutils
+    from shredtools.filter_collinear import main
+
+    lengths = np.array([10, 12, 8], dtype=np.uint32)
+    starts = np.array(
+        [
+            [0, 0, 0],
+            [20, -1, 20],
+            [40, 40, 40],
+        ],
+        dtype=np.int64,
+    )
+    strands = np.ones((3, 3), dtype=bool)
+    path = tmp_path / "plus.enhanced.mums"
+    mutils.MUMdata.from_arrays(lengths, starts, strands).write_mums(str(path))
+
+    main([str(path), "--partial", "-i"])
+
+    text = path.read_text()
+    assert "\t" in text  # text .mums, not binary bumbl
+    assert "-1" not in text
+    reloaded = mutils.MUMdata(str(path), sort=False)
+    assert len(reloaded) == 2

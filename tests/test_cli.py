@@ -18,7 +18,7 @@ def test_top_level_help(runner: ShredtoolsRunner):
 
 def test_version(runner: ShredtoolsRunner):
     result = runner.run_ok("--version")
-    assert "0.1.0" in result.stdout
+    assert "0.1.1" in result.stdout
 
 
 def test_unknown_command(runner: ShredtoolsRunner):

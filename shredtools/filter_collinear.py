@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Filter a .bumbl file:
+Filter a .mums / .bumbl file:
 
 - default: keep only MUMs in collinear blocks (coordinate-system MUMs)
 - --partial: drop partial MUMs (any start == -1)
+
+Output format follows the destination extension (.mums text, .bumbl binary).
 """
 
 import argparse
@@ -18,11 +20,15 @@ import mumemto.utils as mutils
 def parse_arguments(args=None):
     parser = argparse.ArgumentParser(
         description=(
-            "Filter a .bumbl file. Default: keep only collinear-block MUMs. "
+            "Filter a .mums/.bumbl file. Default: keep only collinear-block MUMs. "
             "With --partial: drop partial MUMs (starts containing -1)."
         )
     )
-    parser.add_argument("bumbl_file", type=str, help="Path to the input .bumbl file.")
+    parser.add_argument(
+        "mum_file",
+        type=str,
+        help="Path to the input .mums or .bumbl file.",
+    )
     parser.add_argument(
         "--partial",
         action="store_true",
@@ -34,8 +40,8 @@ def parse_arguments(args=None):
         type=str,
         default=None,
         help=(
-            "Output .bumbl path (default: <input>.coll.bumbl, or "
-            "<input>.strict.bumbl with --partial)."
+            "Output path (default: <input>.coll.<ext>, or "
+            "<input>.strict.<ext> with --partial). Format follows extension."
         ),
     )
     parser.add_argument(
@@ -53,8 +59,8 @@ def parse_arguments(args=None):
 
     args = parser.parse_args(args)
 
-    if not os.path.exists(args.bumbl_file):
-        print(f"Bumbl file {args.bumbl_file} not found", file=sys.stderr)
+    if not os.path.exists(args.mum_file):
+        print(f"MUM file {args.mum_file} not found", file=sys.stderr)
         sys.exit(1)
 
     if args.in_place and args.output is not None:
@@ -62,11 +68,17 @@ def parse_arguments(args=None):
         sys.exit(1)
 
     if args.output is None and not args.in_place:
-        base, ext = os.path.splitext(args.bumbl_file)
+        base, ext = os.path.splitext(args.mum_file)
+        if ext not in (".mums", ".bumbl"):
+            ext = ".bumbl"
         suffix = ".strict" if args.partial else ".coll"
-        args.output = f"{base}{suffix}{ext or '.bumbl'}"
+        args.output = f"{base}{suffix}{ext}"
 
     return args
+
+
+def _is_mums_path(path):
+    return os.path.splitext(path)[1] == ".mums"
 
 
 def filter_partial_mums(mums):
@@ -110,12 +122,21 @@ def filter_collinear_mums(mums, verbose=False):
     return mums, new_blocks
 
 
-def _write_bumbl(mums, dest, blocks=None):
+def _write_mums_file(mums, dest, blocks=None):
+    """Write text .mums or binary .bumbl based on dest extension."""
     out_dir = os.path.dirname(os.path.abspath(dest)) or "."
-    fd, tmp_path = tempfile.mkstemp(prefix=".bumbl.filter.", suffix=".tmp", dir=out_dir)
+    as_mums = _is_mums_path(dest)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".mum.filter.",
+        suffix=".mums.tmp" if as_mums else ".bumbl.tmp",
+        dir=out_dir,
+    )
     os.close(fd)
     try:
-        mums.write_bums(tmp_path, blocks=blocks)
+        if as_mums:
+            mums.write_mums(tmp_path, blocks=blocks)
+        else:
+            mums.write_bums(tmp_path, blocks=blocks)
         os.replace(tmp_path, dest)
     except Exception:
         try:
@@ -130,15 +151,15 @@ def main(args=None):
 
     # Collinear mode sorts; --partial only needs a row scan for -1 starts.
     mums = mutils.MUMdata(
-        args.bumbl_file,
+        args.mum_file,
         sort=not args.partial,
         verbose=args.verbose,
     )
     if mums.num_mums == 0 or mums.num_seqs == 0:
-        print("Bumbl file empty.", file=sys.stderr)
+        print("MUM file empty.", file=sys.stderr)
         sys.exit(0)
 
-    dest = args.bumbl_file if args.in_place else args.output
+    dest = args.mum_file if args.in_place else args.output
     blocks = None
 
     if args.partial:
@@ -146,16 +167,17 @@ def main(args=None):
     else:
         mums, blocks = filter_collinear_mums(mums, verbose=args.verbose)
 
-    _write_bumbl(mums, dest, blocks=blocks)
+    _write_mums_file(mums, dest, blocks=blocks)
+    fmt = "mums" if _is_mums_path(dest) else "bumbl"
 
     if args.partial:
         print(
-            f"Wrote strict bumbl: {dest} (n_mums={mums.num_mums})",
+            f"Wrote strict {fmt}: {dest} (n_mums={mums.num_mums})",
             file=sys.stderr,
         )
     else:
         print(
-            f"Wrote filtered bumbl: {dest} "
+            f"Wrote filtered {fmt}: {dest} "
             f"(n_mums={mums.num_mums}, num_blocks={len(blocks)})",
             file=sys.stderr,
         )

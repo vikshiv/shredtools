@@ -36,7 +36,7 @@ COMMANDS: dict[str, tuple[str, str, str]] = {
     "filter": (
         "shredtools.filter_collinear",
         "main",
-        "Filter a .bumbl: keep collinear-block MUMs (default), or drop partial MUMs (--partial).",
+        "Filter a .mums/.bumbl: keep collinear-block MUMs (default), or drop partial MUMs (--partial).",
     ),
     "index": (
         "shredtools.index_bumbl",
