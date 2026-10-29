@@ -89,10 +89,10 @@ For a real example on pre-built HPRC data, see [More examples](#more-examples).
 
 **Prerequisites**
 
-The input `bumbl` file should be pre-processed before indexing. `shredtools filter` can both sort and filter for collinear multi-MUMs in a single command. For completeness, the following prerequisites are required prior to indexing:
+The input `bumbl` file should be pre-processed before indexing. `shredtools filter` (default mode) can both sort and filter for collinear multi-MUMs in a single command. For completeness, the following prerequisites are required prior to indexing:
 
 1. **Sorted rows.** MUM rows must be sorted by position in one of the sequences. Use `shredtools sort`.
-2. **Optional filter.** `shredtools filter` keeps only MUMs that belong to collinear blocks, which form the coordinate system and filters out potentially spurious matches.
+2. **Optional filter.** `shredtools filter` keeps only MUMs that belong to collinear blocks, which form the coordinate system and filters out potentially spurious matches. Use `shredtools filter --partial` to drop partial MUMs (any start == `-1`) without collinear-block filtering.
 
 ```bash
 # achieves both pre-processing steps in one command, in place
@@ -231,7 +231,7 @@ shredtools fasta regions/prefix.bed -o fasta_out/ --agc archive.agc -t 8
 | -------------------- | ------------------------------------------------------- |
 | `shredtools shred`   | Vertically slice a pangenome into syntenic strips (BED) |
 | `shredtools sort`    | Sort a `.bumbl` by position in an assembly              |
-| `shredtools filter`  | Keep only collinear-block MUMs in a `.bumbl`            |
+| `shredtools filter`  | Keep collinear-block MUMs, or drop partials (`--partial`) |
 | `shredtools index`   | Build a `.bumbl.bi` index for interval queries          |
 | `shredtools extract` | Extract syntenic regions from a query interval (BED)    |
 | `shredtools subset`  | Subset multi-MUM rows overlapping a query region        |
