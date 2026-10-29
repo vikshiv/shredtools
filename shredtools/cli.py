@@ -65,7 +65,7 @@ COMMANDS: dict[str, tuple[str, str, str]] = {
     ),
 }
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 _COMMAND_HELP = "\n".join(
     f"  {name:8}  {desc}" for name, (_, _, desc) in sorted(COMMANDS.items())
