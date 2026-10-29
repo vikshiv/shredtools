@@ -61,7 +61,20 @@ def parse_arguments(args=None):
         dest="outlier_factor",
         type=float,
         default=None,
-        help="Outlier threshold factor for too-small gaps: mark if gap < (median - factor*MAD). Default: 5.",
+        help=(
+            "Outlier threshold factor for too-small gaps: mark if gap < "
+            "(median - factor*MAD). Off by default (no outlier detection); "
+            "suggested value: 5."
+        ),
+    )
+    parser.add_argument(
+        "--no-partial",
+        dest="no_partial",
+        action="store_true",
+        help=(
+            "Do not add partial MUMs when some assemblies lack a valid gap "
+            "sequence. Only valid when --outlier-factor is not set."
+        ),
     )
     parser.add_argument(
         "--min-match-len",
@@ -95,6 +108,14 @@ def parse_arguments(args=None):
 
     if args.outlier_factor is not None and args.outlier_factor < 0:
         print("--outlier-factor must be >= 0", file=sys.stderr)
+        sys.exit(1)
+
+    if args.no_partial and args.outlier_factor is not None:
+        print(
+            "--no-partial conflicts with --outlier-factor "
+            "(outlier mode intentionally produces partial MUMs)",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if args.min_match_len < 1:
@@ -184,9 +205,10 @@ def compute_gap_coords_and_lengths(mums):
     return gaps, coords, gap_lengths
 
 
-def compute_outlier_mask(gap_lengths, outlier_factor=5.0):
+def compute_outlier_mask(gap_lengths, outlier_factor=None):
     """
     Mark genomes that are *too small* for a gap vs per-gap median (med - outlier_factor*MAD).
+    Returns None when outlier_factor is None (no outlier detection).
     """
     if outlier_factor is None:
         return None
@@ -217,6 +239,7 @@ def _worker_init(
     total_lens_per_seq,
     min_match_len,
     num_seqs,
+    no_partial,
 ):
     global _CTX
     fastas = [pysam.FastaFile(p) for p in seq_paths]
@@ -227,6 +250,7 @@ def _worker_init(
         "total_lens_per_seq": list(total_lens_per_seq),
         "min_match_len": int(min_match_len),
         "num_seqs": int(num_seqs),
+        "no_partial": bool(no_partial),
     }
 
 
@@ -264,7 +288,7 @@ def _fetch_gap_intervals(coords_row, keep_mask):
     return gap_seq
 
 
-def enhance_gap(gap_seqs, min_match_len):
+def enhance_gap(gap_seqs, min_match_len, no_partial=False):
     input_seqs = []
     present_idx = []
     present_offsets = []
@@ -278,6 +302,9 @@ def enhance_gap(gap_seqs, min_match_len):
 
     num_seqs_total = len(gap_seqs)
     if not input_seqs:
+        return None
+    # Some assemblies had invalid/empty gap sequence → would yield partial MUMs.
+    if no_partial and len(present_idx) < num_seqs_total:
         return None
 
     out_mums = run_mumemto(input_seqs, min_match_len=int(min_match_len))
@@ -305,7 +332,7 @@ def _worker_one(task):
     _gap_id, coords_row, keep_mask = task
     ctx = _CTX
     payloads = _fetch_gap_intervals(coords_row, keep_mask)
-    return enhance_gap(payloads, ctx["min_match_len"])
+    return enhance_gap(payloads, ctx["min_match_len"], no_partial=ctx["no_partial"])
 
 
 def main(args=None):
@@ -348,6 +375,7 @@ def main(args=None):
         total_lens,
         int(args.min_match_len),
         num_seqs,
+        bool(args.no_partial),
     )
 
     threads = min(int(args.threads), max(1, len(work)))

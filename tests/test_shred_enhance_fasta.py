@@ -49,6 +49,43 @@ def test_enhance_no_gaps_fast(
     assert "Gaps to enhance: 0" in result.stderr
 
 
+def test_enhance_help_outlier_and_no_partial(runner: ShredtoolsRunner):
+    result = runner.run_ok("enhance", "-h")
+    assert "--no-partial" in result.stdout
+    assert "suggested value: 5" in result.stdout
+    assert "Default: 5" not in result.stdout
+
+
+def test_enhance_no_partial_conflicts_with_outlier(tmp_path):
+    from shredtools.enhance import parse_arguments
+
+    mum = tmp_path / "x.mums"
+    mum.write_text("")
+    lens = tmp_path / "x.lengths"
+    lens.write_text("")
+    with pytest.raises(SystemExit) as exc:
+        parse_arguments(
+            [
+                str(mum),
+                "20",
+                "-l",
+                str(lens),
+                "--outlier-factor",
+                "5",
+                "--no-partial",
+            ]
+        )
+    assert exc.value.code == 1
+
+
+def test_enhance_gap_no_partial_skips_incomplete():
+    from shredtools.enhance import enhance_gap
+
+    # One assembly missing → would be a partial MUM; --no-partial drops it.
+    gap_seqs = [(0, "ACGTACGTACGT"), None, (10, "ACGTACGTACGT")]
+    assert enhance_gap(gap_seqs, min_match_len=4, no_partial=True) is None
+
+
 @pytest.mark.requires_refs
 def test_fasta_from_extract_bed(
     runner: ShredtoolsRunner,
