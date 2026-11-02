@@ -351,6 +351,8 @@ base64.b64encode(data).decode()
 
     let manifest = null;
     let selectedSeqs = null; // Set<number>; null means not initialized yet
+    /** Preferred y-order for plot/list; selection is independent via selectedSeqs. */
+    let seqOrder = null; // number[] | null
     let lastRows = null;
     let lastMeta = null;
     let lastUnavailable = null;
@@ -806,6 +808,7 @@ app.register_custom_pangenome(
     function markQueryUiUnloaded(hint) {
       manifest = null;
       selectedSeqs = null;
+      seqOrder = null;
       $("genome").innerHTML = "";
       $("contig").innerHTML = "";
       $("genome").disabled = true;
@@ -1126,10 +1129,16 @@ import synteny_plot
       $("syntenyHint").hidden = false;
     }
 
+    function defaultSeqOrder() {
+      return manifest.genomes.map((g) => g.seq_idx);
+    }
+
+    /** Selected genomes in UI/plot y-order (seqOrder), not sorted by seq_idx. */
     function getSelectedSeqIndices() {
       if (!manifest) return [];
-      if (selectedSeqs) return [...selectedSeqs].sort((a, b) => a - b);
-      return manifest.genomes.map((g) => g.seq_idx);
+      if (selectedSeqs && seqOrder) return seqOrder.filter((i) => selectedSeqs.has(i));
+      if (selectedSeqs) return [...selectedSeqs];
+      return defaultSeqOrder();
     }
 
     function getFilteredRows() {
@@ -1806,7 +1815,77 @@ import synteny_plot
       const n = manifest?.genomes?.length ?? 0;
       const selN = selectedSeqs ? selectedSeqs.size : 0;
       const all = selN === n;
-      $("seqSummary").textContent = all ? `Sequences: all (${n})` : `Sequences: ${selN}/${n}`;
+      const customOrder =
+        seqOrder &&
+        seqOrder.length === n &&
+        seqOrder.some((si, i) => si !== manifest.genomes[i]?.seq_idx);
+      const base = all ? `Sequences: all (${n})` : `Sequences: ${selN}/${n}`;
+      $("seqSummary").textContent = customOrder ? `${base} · custom order` : base;
+    }
+
+    function hintReplotIfNeeded() {
+      const img = $("syntenyImg");
+      if (img.classList.contains("visible") && img.getAttribute("src")) {
+        $("syntenyHint").textContent = "Sequence order changed — click Plot to redraw.";
+        $("syntenyHint").hidden = false;
+      }
+    }
+
+    function onSeqOrderChanged() {
+      updateSeqSummary();
+      renderSeqList();
+      hintReplotIfNeeded();
+    }
+
+    function visibleSeqOrder() {
+      const q = String($("seqFilter").value || "").toLowerCase().trim();
+      const byIdx = new Map(manifest.genomes.map((g) => [g.seq_idx, g]));
+      const order = seqOrder || defaultSeqOrder();
+      return order.filter((si) => {
+        const g = byIdx.get(si);
+        if (!g) return false;
+        if (!q) return true;
+        return prettyGenome(g.label).toLowerCase().includes(q);
+      });
+    }
+
+    /** Swap seqIdx with neighbor in seqOrder (dir -1 = up / earlier y, +1 = down). */
+    function moveSeqInOrder(seqIdx, dir) {
+      if (!seqOrder) return;
+      const visible = visibleSeqOrder();
+      const vi = visible.indexOf(seqIdx);
+      if (vi < 0) return;
+      const vj = vi + dir;
+      if (vj < 0 || vj >= visible.length) return;
+      const i = seqOrder.indexOf(seqIdx);
+      const j = seqOrder.indexOf(visible[vj]);
+      if (i < 0 || j < 0) return;
+      const tmp = seqOrder[i];
+      seqOrder[i] = seqOrder[j];
+      seqOrder[j] = tmp;
+      onSeqOrderChanged();
+    }
+
+    function moveQueryFirst() {
+      if (!seqOrder) return;
+      const qi = parseInt($("genome").value, 10);
+      if (!Number.isFinite(qi)) return;
+      const i = seqOrder.indexOf(qi);
+      if (i < 0) {
+        seqOrder.unshift(qi);
+      } else if (i > 0) {
+        seqOrder.splice(i, 1);
+        seqOrder.unshift(qi);
+      } else {
+        return;
+      }
+      onSeqOrderChanged();
+    }
+
+    function resetSeqOrder() {
+      if (!manifest) return;
+      seqOrder = defaultSeqOrder();
+      onSeqOrderChanged();
     }
 
     function applySeqFilterToOutput() {
@@ -1826,15 +1905,22 @@ import synteny_plot
       const list = $("seqList");
       list.innerHTML = "";
       const frag = document.createDocumentFragment();
-      for (const g of manifest.genomes) {
+      const order = seqOrder || defaultSeqOrder();
+      const byIdx = new Map(manifest.genomes.map((g) => [g.seq_idx, g]));
+      const visible = [];
+      for (const seqIdx of order) {
+        const g = byIdx.get(seqIdx);
+        if (!g) continue;
         const label = prettyGenome(g.label);
         if (q && !label.toLowerCase().includes(q)) continue;
+        visible.push(g);
+      }
+      visible.forEach((g, visPos) => {
         const id = `seq_${g.seq_idx}`;
         const row = document.createElement("div");
-        row.style.display = "flex";
-        row.style.alignItems = "center";
-        row.style.gap = "0.4rem";
-        row.style.margin = "0.15rem 0";
+        row.className = "seq-row";
+        row.dataset.seqIdx = String(g.seq_idx);
+
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.id = id;
@@ -1847,18 +1933,40 @@ import synteny_plot
         });
         const lab = document.createElement("label");
         lab.htmlFor = id;
-        lab.textContent = label;
+        lab.textContent = prettyGenome(g.label);
+
+        const controls = document.createElement("span");
+        controls.className = "seq-order-btns";
+        const up = document.createElement("button");
+        up.type = "button";
+        up.className = "seq-order-btn";
+        up.title = "Move up in plot order";
+        up.setAttribute("aria-label", `Move ${prettyGenome(g.label)} up`);
+        up.textContent = "↑";
+        up.disabled = visPos === 0;
+        up.addEventListener("click", () => moveSeqInOrder(g.seq_idx, -1));
+        const down = document.createElement("button");
+        down.type = "button";
+        down.className = "seq-order-btn";
+        down.title = "Move down in plot order";
+        down.setAttribute("aria-label", `Move ${prettyGenome(g.label)} down`);
+        down.textContent = "↓";
+        down.disabled = visPos === visible.length - 1;
+        down.addEventListener("click", () => moveSeqInOrder(g.seq_idx, 1));
+        controls.appendChild(up);
+        controls.appendChild(down);
+
         row.appendChild(cb);
         row.appendChild(lab);
+        row.appendChild(controls);
         frag.appendChild(row);
-      }
+      });
       list.appendChild(frag);
     }
 
     function initSeqPicker() {
-      const n = manifest.genomes.length;
-      selectedSeqs = new Set();
-      for (let i = 0; i < n; i++) selectedSeqs.add(manifest.genomes[i].seq_idx);
+      seqOrder = defaultSeqOrder();
+      selectedSeqs = new Set(seqOrder);
       updateSeqSummary();
       renderSeqList();
 
@@ -1874,6 +1982,8 @@ import synteny_plot
         renderSeqList();
         applySeqFilterToOutput();
       };
+      $("seqResetOrder").onclick = () => resetSeqOrder();
+      $("seqQueryFirst").onclick = () => moveQueryFirst();
       $("seqFilter").oninput = () => renderSeqList();
     }
 

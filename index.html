@@ -371,6 +371,35 @@
       padding: 0.5rem;
       border-radius: 4px;
     }
+    .seq-row {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin: 0.15rem 0;
+    }
+    .seq-row label {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .seq-order-btns {
+      display: inline-flex;
+      gap: 0.15rem;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+    .seq-order-btn {
+      padding: 0.1rem 0.35rem;
+      line-height: 1.1;
+      font-size: 0.85rem;
+      min-width: 1.6rem;
+    }
+    .seq-order-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+    }
     #lengthsHistCanvas {
       width: 100%;
       max-width: 100%;
@@ -641,6 +670,8 @@
     <div class="row" style="margin-top:0.5rem;">
       <button type="button" id="seqAll">Select all</button>
       <button type="button" id="seqNone">Deselect all</button>
+      <button type="button" id="seqResetOrder" title="Restore manifest / lengths order">Reset order</button>
+      <button type="button" id="seqQueryFirst" title="Move the query genome to the top of the plot order">Query first</button>
       <input type="text" id="seqFilter" placeholder="filter (e.g. HG002)" style="flex:1 1 12rem; min-width: 12rem;" />
     </div>
     <div id="seqList" class="seq-list"></div>
