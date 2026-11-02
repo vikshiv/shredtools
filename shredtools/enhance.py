@@ -20,7 +20,10 @@ _CTX: dict = {}
 
 def parse_arguments(args=None):
     parser = argparse.ArgumentParser(
-        description="Enhance multi-MUM collection by finding local MUMs in gaps between collinear global MUMs."
+        description=(
+            "Enhance multi-MUM collection by finding local MUMs in gaps "
+            "between collinear global MUMs (optionally also block flanks)."
+        )
     )
     parser.add_argument("mum_file", type=str, help="Path to the input MUM file.")
     parser.add_argument(
@@ -55,6 +58,15 @@ def parse_arguments(args=None):
         "-l",
         dest="lens",
         help="Multilengths file. Default: <mum_file>.lengths",
+    )
+    parser.add_argument(
+        "--flanks",
+        action="store_true",
+        help=(
+            "Also search terminal flanks (before the first block and after "
+            "the last) and gaps between consecutive collinear blocks. "
+            "Off by default."
+        ),
     )
     parser.add_argument(
         "--outlier-factor",
@@ -174,31 +186,99 @@ def _subset_sequences(
     return mums, seq_lengths_multi, contig_names, total_lens, seq_paths
 
 
-def compute_gap_coords_and_lengths(mums):
+def _pair_gap_coords(mums, l, r):
+    """Orientation-aware [left, right) coords and lengths between MUM indices l and r."""
+    left_starts = mums.starts[l]
+    right_starts = mums.starts[r]
+    left_lens = mums.lengths[l]
+    right_lens = mums.lengths[r]
+
+    flipped = right_starts < left_starts
+    lens = np.where(flipped, right_lens, left_lens)
+    gap_len = np.abs(left_starts - right_starts) - lens
+    left_coords = np.where(flipped, right_starts + right_lens, left_starts + left_lens)
+    right_coords = np.where(flipped, left_starts, right_starts)
+    return np.column_stack((left_coords, right_coords)), gap_len
+
+
+def _block_coverage_endpoints(mums, s, e):
+    """Per-genome leftmost start and rightmost end of MUMs s..e (orientation-aware)."""
+    first_starts = mums.starts[s]
+    last_starts = mums.starts[e]
+    first_lens = mums.lengths[s]
+    last_lens = mums.lengths[e]
+    flipped = last_starts < first_starts
+    leftmost = np.where(flipped, last_starts, first_starts).astype(np.int64, copy=False)
+    rightmost = np.where(
+        flipped, first_starts + first_lens, last_starts + last_lens
+    ).astype(np.int64, copy=False)
+    return leftmost, rightmost
+
+
+def compute_gap_coords_and_lengths(mums, include_flanks=False, total_lens=None):
+    """
+    Build per-interval [left, right) coords and lengths for collinear gaps.
+
+    Internal gaps are consecutive MUM pairs (i, i+1) within each block.
+
+    With include_flanks=True, also append (once each):
+      - left terminal:  [0, start of first MUM in the first block)
+      - inter-block:    gaps between last MUM of block_k and first of block_{k+1}
+      - right terminal: [end of last MUM in the last block, genome_len)
+    Intermediate blocks do not get flanks back to 0 / out to genome end.
+    """
+    if include_flanks and total_lens is None:
+        raise ValueError("total_lens is required when include_flanks=True")
+
+    num_seqs = int(mums.starts.shape[1]) if len(mums) else 0
+    genome_lens = (
+        np.asarray(total_lens, dtype=np.int64) if total_lens is not None else None
+    )
+
     gaps = []
-    for s, e in mums.blocks:
+    coords = []
+    gap_lengths = []
+
+    blocks = list(mums.blocks)
+    for s, e in blocks:
         for i in range(s, e):
+            pair_coords, gap_len = _pair_gap_coords(mums, i, i + 1)
+            coords.append(pair_coords)
+            gap_lengths.append(gap_len)
             gaps.append((i, i + 1))
+
+    if include_flanks and blocks:
+        s0, e0 = blocks[0]
+        sN, eN = blocks[-1]
+
+        # Left terminal: [0, leftmost start of first block)
+        leftmost, _ = _block_coverage_endpoints(mums, s0, e0)
+        left_lo = np.zeros(num_seqs, dtype=np.int64)
+        left_hi = leftmost
+        coords.append(np.column_stack((left_lo, left_hi)))
+        gap_lengths.append(np.maximum(left_hi - left_lo, 0))
+        gaps.append(("left", s0, e0))
+
+        # Inter-block gaps between consecutive collinear blocks
+        for bi in range(len(blocks) - 1):
+            _s_a, e_a = blocks[bi]
+            s_b, _e_b = blocks[bi + 1]
+            pair_coords, gap_len = _pair_gap_coords(mums, e_a, s_b)
+            coords.append(pair_coords)
+            gap_lengths.append(gap_len)
+            gaps.append(("inter", e_a, s_b))
+
+        # Right terminal: [rightmost end of last block, genome_len)
+        _, rightmost = _block_coverage_endpoints(mums, sN, eN)
+        right_lo = rightmost
+        right_hi = genome_lens
+        coords.append(np.column_stack((right_lo, right_hi)))
+        gap_lengths.append(np.maximum(right_hi - right_lo, 0))
+        gaps.append(("right", sN, eN))
+
     if len(gaps) == 0:
         print("No collinear MUM gaps found.", file=sys.stderr)
         raise SystemExit(1)
-
-    coords = []
-    gap_lengths = []
-    for l, r in gaps:
-        left_starts = mums.starts[l]
-        right_starts = mums.starts[r]
-        left_lens = mums.lengths[l]
-        right_lens = mums.lengths[r]
-
-        flipped = right_starts < left_starts
-
-        lens = np.where(flipped, right_lens, left_lens)
-        gap_lengths.append(np.abs(left_starts - right_starts) - lens)
-
-        left_coords = np.where(flipped, right_starts + right_lens, left_starts + left_lens)
-        right_coords = np.where(flipped, left_starts, right_starts)
-        coords.append(np.column_stack((left_coords, right_coords)))
 
     gap_lengths = np.asarray(gap_lengths)
     coords = np.asarray(coords)
@@ -359,10 +439,15 @@ def main(args=None):
         print("No collinear MUMs found.", file=sys.stderr)
         raise SystemExit(1)
 
-    gaps, coords, gap_lengths = compute_gap_coords_and_lengths(mums)
+    gaps, coords, gap_lengths = compute_gap_coords_and_lengths(
+        mums,
+        include_flanks=bool(args.flanks),
+        total_lens=total_lens if args.flanks else None,
+    )
     gap_ids = np.where((gap_lengths >= int(args.min_gap_length)).any(axis=1))[0].tolist()
 
-    print(f"Total MUM gap count: {len(gaps)}", file=sys.stderr)
+    kind = "gaps + flanks" if args.flanks else "gap"
+    print(f"Total MUM {kind} count: {len(gaps)}", file=sys.stderr)
     print(f"Gaps to enhance: {len(gap_ids)}", file=sys.stderr)
 
     outlier_mask = compute_outlier_mask(gap_lengths, outlier_factor=args.outlier_factor)
