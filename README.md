@@ -6,6 +6,8 @@ This branch hosts a small, static, in-browser UI for running `shredtools extract
 
 **Browser link:** [https://vikshiv.github.io/shredtools/hprc](https://vikshiv.github.io/shredtools/hprc)
 
+**Canvas viz beta** (parallel app under `/beta`): [https://vikshiv.github.io/shredtools/beta/](https://vikshiv.github.io/shredtools/beta/)
+
 ---
 
 ## Run locally
