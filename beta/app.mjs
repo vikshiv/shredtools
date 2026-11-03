@@ -3070,7 +3070,7 @@ _result
       btn.disabled = true;
       setActiveTab("synteny");
       setPlotLoading(true, "Fetching MUM bins for Canvas…");
-      status("Plotting…", "denseloading MUMs for Canvas");
+      status("Plotting…", "dense loading MUMs for Canvas");
       try {
         const seqs = getSelectedSeqIndices();
         const mumJson = String(
