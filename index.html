@@ -495,10 +495,16 @@
     }
 
     .beta-viz-link {
-      margin: 0.35rem 0 0.75rem;
+      display: block;
+      margin: 0.5rem 0 0.85rem;
+      padding: 0.55rem 0.75rem;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      background: var(--surface);
       font-size: 0.95rem;
+      color: var(--text-muted);
     }
-    .beta-viz-link a { font-weight: 600; }
+    .beta-viz-link a { font-weight: 650; color: inherit; }
   </style>
 </head>
 <body>
@@ -570,6 +576,9 @@
   <div id="viewQuery">
   <img class="logo" src="shredtools_logo.png" alt="Shredtools logo" />
   <h1 id="appTitle">Shredtools extract - HPRC</h1>
+  <p class="beta-viz-link">
+    <a href="beta/">Try the new interactive shredtools visualization beta</a>
+  </p>
   <div class="row" id="customDatasetRemoveRow">
     <button type="button" id="removeCustomDataset">Remove this dataset</button>
   </div>
