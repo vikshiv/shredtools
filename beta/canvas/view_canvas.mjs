@@ -135,10 +135,15 @@ export class NativeSyntenyView {
     this.extractRegion = extractRegion || null;
     this.dataXMin = dataXMin != null ? dataXMin : 0;
     this.dataXMax = Math.max(this.dataXMin + 1, dataXMax || 1);
+    // Geometry replacement always reframes. Preserving a prior pan/zoom here
+    // left extract-home resets looking shifted after nested extract + pan.
     if (focusRegion && focusRegion.x1 > focusRegion.x0) {
       this.viewX0 = focusRegion.x0;
       this.viewX1 = focusRegion.x1;
-    } else if (!(this.viewX1 > this.viewX0)) {
+    } else if (this.extractRegion && this.extractRegion.x1 > this.extractRegion.x0) {
+      this.viewX0 = this.extractRegion.x0;
+      this.viewX1 = this.extractRegion.x1;
+    } else {
       this.viewX0 = this.dataXMin;
       this.viewX1 = this.dataXMax;
     }

@@ -6,7 +6,7 @@ import {
   fastaDownloadFilename,
   setBgzfDecompressor,
 } from "./fasta_download.js";
-import { NativeSyntenyView, PAD_T } from "./canvas/view_canvas.mjs?v=8";
+import { NativeSyntenyView, PAD_T } from "./canvas/view_canvas.mjs?v=9";
 import {
   buildContigSegments,
   identityOrder,
@@ -1271,14 +1271,35 @@ import synteny_plot
       if (!syntenyView || !canvasHasData || !canvasHome) return;
       canvasNestWindows = null;
       const order = genomeOrderForReset();
+      const focus =
+        canvasHome.focusRegion &&
+        canvasHome.focusRegion.x1 > canvasHome.focusRegion.x0
+          ? { ...canvasHome.focusRegion }
+          : canvasHome.extractRegion &&
+              canvasHome.extractRegion.x1 > canvasHome.extractRegion.x0
+            ? {
+                x0: canvasHome.extractRegion.x0,
+                x1: canvasHome.extractRegion.x1,
+              }
+            : {
+                x0: canvasHome.dataXMin,
+                x1: canvasHome.dataXMax,
+              };
+      // canvasHome omits ephemeral view state; always re-assert extract mode
+      // so reset cannot fall back to overview (twist + contig cascades).
       pushCanvasExtract(
         {
           ...canvasHome,
           genomeOrder: order,
           centering: order.map(() => 0),
+          mode: "concat",
+          viewKind: "extract",
+          focusRegion: focus,
         },
         { saveHome: false }
       );
+      const wrap = $("syntenyCanvasWrap");
+      if (wrap) wrap.scrollLeft = 0;
       $("syntenyHint").textContent =
         `Extract home (${canvasHome.nBlocks} ribbons). Order/selection kept. Drag=extract · Reset=home.`;
       $("syntenyHint").hidden = false;
@@ -1698,6 +1719,8 @@ import synteny_plot
           segmentsByGenome: payload.segmentsByGenome,
           dataXMin: payload.dataXMin,
           dataXMax: payload.dataXMax,
+          mode: payload.mode || "concat",
+          viewKind: payload.viewKind || "extract",
           queryAxis: payload.queryAxis ? { ...payload.queryAxis } : null,
           extractRegion: payload.extractRegion
             ? {
