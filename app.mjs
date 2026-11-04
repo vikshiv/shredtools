@@ -12,24 +12,30 @@ const $ = (id) => document.getElementById(id);
     const CUSTOM_DATASETS_KEY = "shredtools.customDatasets";
     const HUMAN_TAB_ID = "human";
     const CICHLID_TAB_ID = "cichlid";
+    const ARABIDOPSIS_TAB_ID = "arabidopsis";
     const ADD_TAB_ID = "__add__";
 
     const HUMAN_EMOJI = "🧍";
     const CICHLID_EMOJI = "🐟";
+    const ARABIDOPSIS_EMOJI = "🌱";
     const CICHLID_BUMBL_URL =
       "https://ftp.ebi.ac.uk/pub/databases/metagenomics/research-team/shivakumar/cichlids.bumbl";
     const CICHLID_ANNOTATION_URL = new URL(
       "data/cichlid.annotations.genes.json",
       import.meta.url
     ).href;
+    const ARABIDOPSIS_BUMBL_URL =
+      "https://ftp.ebi.ac.uk/pub/databases/metagenomics/research-team/shivakumar/athaliana.bumbl";
 
     const ROUTE_BY_TAB = {
       [HUMAN_TAB_ID]: "hprc",
       [CICHLID_TAB_ID]: "cichlid",
+      [ARABIDOPSIS_TAB_ID]: "arabidopsis",
     };
     const TAB_BY_ROUTE = {
       hprc: HUMAN_TAB_ID,
       cichlid: CICHLID_TAB_ID,
+      arabidopsis: ARABIDOPSIS_TAB_ID,
     };
 
     function pathnameLastSegment() {
@@ -40,8 +46,7 @@ const $ = (id) => document.getElementById(id);
     }
 
     function isRoutedPath() {
-      const last = pathnameLastSegment();
-      return last === "hprc" || last === "cichlid";
+      return !!TAB_BY_ROUTE[pathnameLastSegment()];
     }
 
     function appBasePath() {
@@ -49,7 +54,7 @@ const $ = (id) => document.getElementById(id);
       if (p.endsWith("/index.html")) p = p.slice(0, -"/index.html".length);
       const parts = p.split("/").filter(Boolean);
       const last = (parts[parts.length - 1] || "").toLowerCase();
-      if (last === "hprc" || last === "cichlid") parts.pop();
+      if (TAB_BY_ROUTE[last]) parts.pop();
       return parts.length ? "/" + parts.join("/") : "";
     }
 
@@ -79,6 +84,7 @@ const $ = (id) => document.getElementById(id);
       let suffix;
       if (tab.kind === "human") suffix = "HPRC";
       else if (tab.id === CICHLID_TAB_ID) suffix = "Cichlid";
+      else if (tab.id === ARABIDOPSIS_TAB_ID) suffix = "Arabidopsis";
       else suffix = tab.label;
       const pageTitle = `Shredtools extract - ${suffix}`;
       document.title = `Shredtools - ${suffix}`;
@@ -378,6 +384,20 @@ base64.b64encode(data).decode()
         biUrl: `${CICHLID_BUMBL_URL}.bi`,
         pyKey: "builtin_cichlid",
         annotationUrl: CICHLID_ANNOTATION_URL,
+        annotationJson: null,
+        loadError: null,
+        registered: false,
+      },
+      {
+        id: ARABIDOPSIS_TAB_ID,
+        kind: "builtin",
+        label: "Arabidopsis",
+        emoji: ARABIDOPSIS_EMOJI,
+        bumblUrl: ARABIDOPSIS_BUMBL_URL,
+        lengthsUrl: ARABIDOPSIS_BUMBL_URL.replace(/\.bumbl$/i, ".lengths"),
+        biUrl: `${ARABIDOPSIS_BUMBL_URL}.bi`,
+        pyKey: "builtin_arabidopsis",
+        annotationUrl: "",
         annotationJson: null,
         loadError: null,
         registered: false,
