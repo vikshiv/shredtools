@@ -37,6 +37,10 @@ const $ = (id) => document.getElementById(id);
     ).href;
     const ARABIDOPSIS_BUMBL_URL =
       "https://ftp.ebi.ac.uk/pub/databases/metagenomics/research-team/shivakumar/athaliana.bumbl";
+    const ARABIDOPSIS_ANNOTATION_URL = new URL(
+      "data/arabidopsis.annotations.genes.json",
+      import.meta.url
+    ).href;
 
     const ROUTE_BY_TAB = {
       [HUMAN_TAB_ID]: "hprc",
@@ -424,7 +428,7 @@ base64.b64encode(data).decode()
         lengthsUrl: ARABIDOPSIS_BUMBL_URL.replace(/\.bumbl$/i, ".lengths"),
         biUrl: `${ARABIDOPSIS_BUMBL_URL}.bi`,
         pyKey: "builtin_arabidopsis",
-        annotationUrl: "",
+        annotationUrl: ARABIDOPSIS_ANNOTATION_URL,
         annotationJson: null,
         loadError: null,
         registered: false,
